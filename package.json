@@ -1,0 +1,36 @@
+{
+  "name": "webhook-forwarder",
+  "version": "1.0.0",
+  "description": "A reliable webhook relay service that receives and forwards payloads to multiple targets",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "test": "jest --coverage",
+    "test:watch": "jest --watch",
+    "test:db": "node scripts/test-db-connection.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.9",
+    "dotenv": "^17.3.1",
+    "express": "^4.18.2",
+    "express-rate-limit": "^7.2.0",
+    "mongodb": "^6.12.0",
+    "morgan": "^1.10.0",
+    "uuid": "^9.0.0",
+    "winston": "^3.11.0"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "nock": "^13.5.4",
+    "nodemon": "^3.1.0",
+    "supertest": "^6.3.4"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "coverageDirectory": "coverage",
+    "collectCoverageFrom": [
+      "src/**/*.js"
+    ]
+  }
+}

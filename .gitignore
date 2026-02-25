@@ -1,0 +1,5 @@
+node_modules/
+coverage/
+.env
+config.json
+*.log

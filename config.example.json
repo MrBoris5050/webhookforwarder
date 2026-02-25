@@ -1,0 +1,90 @@
+{
+  "_comment": "Rename this file to config.json to use it. Settings here are overridden by environment variables.",
+
+  "port": 3000,
+  "webhookPath": "/webhook",
+  "logLevel": "info",
+
+  "retry": {
+    "maxAttempts": 3,
+    "delays": [1000, 3000, 9000]
+  },
+
+  "timeoutMs": 10000,
+
+  "signature": {
+    "enabled": false,
+    "secret": "your-webhook-secret",
+    "header": "x-hub-signature-256",
+    "algorithm": "sha256"
+  },
+
+  "admin": {
+    "username": "admin",
+    "password": "changeme",
+    "authRequired": true
+  },
+
+  "store": {
+    "maxWebhooks": 200,
+    "maxDLQ": 500
+  },
+
+  "targets": [
+    {
+      "id": "slack",
+      "url": "https://hooks.slack.com/services/XXX/YYY/ZZZ",
+      "enabled": true,
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "transform": {
+        "text": "Webhook received: {{event}} from {{source}}"
+      },
+      "rateLimit": {
+        "requestsPerMinute": 30
+      }
+    },
+    {
+      "id": "pagerduty",
+      "url": "https://events.pagerduty.com/v2/enqueue",
+      "enabled": true,
+      "headers": {},
+      "auth": {
+        "type": "bearer",
+        "token": "your-pagerduty-token"
+      }
+    },
+    {
+      "id": "datadog",
+      "url": "https://http-intake.logs.datadoghq.com/api/v2/logs",
+      "enabled": true,
+      "auth": {
+        "type": "apikey",
+        "header": "DD-API-KEY",
+        "value": "your-datadog-api-key"
+      },
+      "rateLimit": {
+        "requestsPerSecond": 10
+      }
+    },
+    {
+      "id": "internal-service",
+      "url": "https://internal.example.com/api/events",
+      "enabled": true,
+      "auth": {
+        "type": "basic",
+        "username": "webhook-user",
+        "password": "webhook-pass"
+      }
+    },
+    {
+      "id": "backup-sink",
+      "url": "https://backup.example.com/ingest",
+      "enabled": false,
+      "headers": {
+        "X-Source": "webhook-forwarder"
+      }
+    }
+  ]
+}

@@ -1,0 +1,54 @@
+---
+description: Webhook relay service architecture and Express.js patterns
+globs: "**/*.{js,ts}"
+alwaysApply: false
+---
+
+# Webhook Relay Service — Patterns & Conventions
+
+## Service Contract
+
+- **Ingress**: POST `/webhook` receives incoming webhooks.
+- **Targets**: Forward to 5 configurable URLs via env (e.g. `WEBHOOK_TARGET_1` … `WEBHOOK_TARGET_5`).
+- **Retries**: Exponential backoff — 3 attempts with delays **1s, 3s, 9s**.
+- **Dead letter**: Persist failed deliveries in a dead-letter queue (separate storage module).
+- **Admin**: Dashboard at `/admin/stats` (read-only stats).
+- **Config**: All configuration from environment variables; no hardcoded secrets or URLs.
+
+## Module Layout
+
+Keep these as separate modules:
+
+| Module        | Responsibility                          |
+|---------------|----------------------------------------|
+| `server`      | Express app, routes, middleware, startup |
+| `forwarder`   | Sending payload to target URLs          |
+| `retry`       | Backoff schedule (1s, 3s, 9s) and retry loop |
+| `storage`     | Dead-letter queue read/write            |
+| `admin`       | Admin UI and `/admin/stats` logic       |
+
+## Express.js Practices
+
+- **Async/await**: Wrap async route handlers; use a central error-handling middleware so unhandled rejections become JSON error responses (never leave promises unhandled).
+- **Validation**: Use request validation middleware (e.g. body schema, `Content-Type`) before forwarding; reject invalid requests with 400 and a clear message.
+- **Logging**: Use structured logging (e.g. one logger instance, log objects with `event`, `target`, `status`, `error`) — no raw `console.log` in production paths.
+
+## Example Patterns
+
+```javascript
+// ✅ Route: async handler + next(err)
+app.post('/webhook', validateWebhookBody, async (req, res, next) => {
+  try {
+    await forwarder.forward(req.body, req.headers);
+    res.status(202).json({ accepted: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ✅ Retry delays (exponential backoff)
+const RETRY_DELAYS_MS = [1000, 3000, 9000];
+```
+
+- **Config**: Read all URLs and options from `process.env` (e.g. `process.env.WEBHOOK_TARGET_1`); validate required env on startup and exit with a clear message if missing.
+- **Database**: Set `MONGODB_URI` to persist webhooks, DLQ, and activity logs in MongoDB; otherwise storage is in-memory. Optional: `MONGODB_DB_NAME` (default `webhookforwarder`).
