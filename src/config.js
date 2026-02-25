@@ -169,6 +169,10 @@ function loadConfig() {
     },
 
     logLevel: env.LOG_LEVEL || fileConfig.logLevel || 'info',
+
+    deployWebhook: {
+      secret: env.DEPLOY_WEBHOOK_SECRET || fileConfig.deployWebhook?.secret || null,
+    },
   };
 }
 

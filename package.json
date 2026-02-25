@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
+    "deploy": "bash deploy/deploy.sh",
     "test": "jest --coverage",
     "test:watch": "jest --watch",
     "test:db": "node scripts/test-db-connection.js"
@@ -29,8 +30,6 @@
   "jest": {
     "testEnvironment": "node",
     "coverageDirectory": "coverage",
-    "collectCoverageFrom": [
-      "src/**/*.js"
-    ]
+    "collectCoverageFrom": ["src/**/*.js"]
   }
 }

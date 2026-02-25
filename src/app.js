@@ -14,6 +14,7 @@ const { getRouter } = require('./routes/webhook');
 const adminRouter = require('./routes/admin');
 const adminSettingsRouter = require('./routes/adminSettings');
 const healthRouter = require('./routes/health');
+const deployWebhookRouter = require('./routes/deployWebhook');
 
 function createApp() {
   const app = express();
@@ -37,6 +38,7 @@ function createApp() {
   app.use('/', homeRouter);
   app.use('/', authRouter);
   app.use('/health', healthRouter);
+  app.use('/deploy-webhook', deployWebhookRouter);
 
   // Dynamic webhook dispatcher — re-reads config.endpoints on every request so
   // paths added or removed via the admin settings page take effect immediately.
