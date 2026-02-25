@@ -39,10 +39,10 @@ nano /var/www/webhookforwarder/.env
 Use at least:
 
 ```env
-PORT=3000
+PORT=3004
 NODE_ENV=production
 MONGODB_URI=mongodb://webhookapp:webPass12@localhost:27017/webhookforwarder
-TARGET_URLS=https://your-target.example.com/webhook
+TARGET_URLS=''
 ADMIN_PASSWORD=your-secure-admin-password
 ADMIN_AUTH_REQUIRED=true
 LOG_LEVEL=info
@@ -65,7 +65,7 @@ pm2 save
 pm2 startup
 ```
 
-Check: `pm2 status` and `pm2 logs webhook-forwarder`. App should be listening on port 3000.
+Check: `pm2 status` and `pm2 logs webhook-forwarder`. App should be listening on port 3004.
 
 ---
 

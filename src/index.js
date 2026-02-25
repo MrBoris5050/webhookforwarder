@@ -2,6 +2,7 @@
  * Entry point — starts the HTTP server and handles graceful shutdown
  */
 require('dotenv').config(); // must be first — loads .env before any other module reads process.env
+const net = require('net');
 const db = require('./store/db');
 const createApp = require('./app');
 const config = require('./config');
@@ -10,7 +11,28 @@ const retryQueue = require('./services/retryQueue');
 
 let server;
 
+/**
+ * Resolves true if the port is free, false if already in use.
+ */
+function isPortFree(port) {
+  return new Promise((resolve) => {
+    const tester = net.createServer()
+      .once('error', () => resolve(false))
+      .once('listening', () => tester.close(() => resolve(true)))
+      .listen(port, '0.0.0.0');
+  });
+}
+
 async function start() {
+  const portFree = await isPortFree(config.port);
+  if (!portFree) {
+    logger.error('port_in_use', {
+      port: config.port,
+      hint: `Port ${config.port} is already occupied. Set a different PORT in your .env file.`,
+    });
+    process.exit(1);
+  }
+
   await db.init();
   const app = createApp();
   server = app.listen(config.port, () => {
