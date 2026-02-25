@@ -34,11 +34,20 @@ async function start() {
   }
 
   await db.init();
+
+  if (db.isEnabled()) {
+    const storedTargets = await db.getTargets();
+    if (storedTargets && storedTargets.length > 0) {
+      config.targets = storedTargets;
+      logger.info('targets_loaded_from_db', { count: storedTargets.length });
+    }
+  }
+
   const app = createApp();
   server = app.listen(config.port, () => {
     logger.info('server_started', {
       port: config.port,
-      webhookPath: config.webhookPath,
+      webhookEndpoints: config.endpoints.length,
       targets: config.targets.length,
       signatureVerification: config.signature.enabled,
       adminAuth: config.admin.authRequired,
@@ -55,7 +64,10 @@ async function start() {
 
     logger.info(`Admin dashboard → http://localhost:${config.port}/admin/stats/html`);
     logger.info(`Health check    → http://localhost:${config.port}/health`);
-    logger.info(`Webhook endpoint→ http://localhost:${config.port}${config.webhookPath}`);
+    config.endpoints.forEach(ep => {
+      const targetNote = ep.targets ? ` (${ep.targets.length} endpoint-specific target${ep.targets.length !== 1 ? 's' : ''})` : ' (global targets)';
+      logger.info(`Webhook endpoint→ http://localhost:${config.port}${ep.path}${targetNote}`);
+    });
   });
   return server;
 }

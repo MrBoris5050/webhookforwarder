@@ -334,12 +334,32 @@ async function ping() {
   return result;
 }
 
+// ─── Targets (persisted in DB when DB enabled) ───────────────────
+
+async function getTargets() {
+  if (!config.store.mongodbUri) return null;
+  const database = getDb();
+  const doc = await database.collection('settings').findOne({ _id: 'targets' });
+  return doc && Array.isArray(doc.value) ? doc.value : null;
+}
+
+async function saveTargets(targets) {
+  const database = getDb();
+  await database.collection('settings').replaceOne(
+    { _id: 'targets' },
+    { _id: 'targets', value: targets, updated_at: new Date() },
+    { upsert: true }
+  );
+}
+
 module.exports = {
   isEnabled,
   init,
   close,
   ping,
   getDb,
+  getTargets,
+  saveTargets,
   saveWebhook,
   getWebhook,
   listWebhooks,

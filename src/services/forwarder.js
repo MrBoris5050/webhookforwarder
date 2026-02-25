@@ -6,6 +6,7 @@
 const axios = require('axios');
 const config = require('../config');
 const { logger } = require('../middleware/logger');
+const { computeSignature } = require('../middleware/signatureVerifier');
 const stats = require('../store/stats');
 const retryQueue = require('./retryQueue');
 const rateLimiter = require('./rateLimiter');
@@ -88,6 +89,12 @@ async function deliverToTarget(target, payload, incomingHeaders, requestId) {
     'x-request-id': requestId,
   };
 
+  if (target.signature && target.signature.header && target.signature.secret) {
+    const payloadString = typeof transformed === 'string' ? transformed : JSON.stringify(transformed);
+    const sig = computeSignature(payloadString, target.signature.secret, target.signature.algorithm || 'sha256');
+    headers[target.signature.header] = sig;
+  }
+
   const start = Date.now();
   try {
     const response = await axios({
@@ -134,15 +141,16 @@ async function deliverToTarget(target, payload, incomingHeaders, requestId) {
  * Forward a webhook to all enabled targets concurrently.
  * Uses Promise.allSettled so a failure on one target does not block others.
  *
- * @param {Object} webhookData
- * @param {string} webhookData.requestId
- * @param {*}      webhookData.body
- * @param {Object} webhookData.headers
- * @param {string} webhookData.receivedAt
+ * @param {Object}   webhookData
+ * @param {string}   webhookData.requestId
+ * @param {*}        webhookData.body
+ * @param {Object}   webhookData.headers
+ * @param {string}   webhookData.receivedAt
+ * @param {Array}   [overrideTargets]  - per-endpoint targets; falls back to global config.targets
  * @returns {Promise<Array<{targetId, status, reason}>>}
  */
-async function forwardToAllTargets({ requestId, body, headers, receivedAt }) {
-  const enabledTargets = config.targets.filter(t => t.enabled);
+async function forwardToAllTargets({ requestId, body, headers, receivedAt }, overrideTargets) {
+  const enabledTargets = (overrideTargets || config.targets).filter(t => t.enabled);
 
   if (enabledTargets.length === 0) {
     logger.warn('no_targets_configured', { requestId });

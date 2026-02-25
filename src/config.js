@@ -49,6 +49,9 @@ function buildTargets(fileConfig, env) {
       transform: t.transform || null,
       rateLimit: t.rateLimit || null,
       enabled: t.enabled !== false,
+      signature: t.signature || null,
+      // endpoints: which receiver paths forward to this target; [] = all
+      endpoints: Array.isArray(t.endpoints) ? t.endpoints : [],
     }));
   }
 
@@ -57,7 +60,17 @@ function buildTargets(fileConfig, env) {
   const headers = parseTargetHeaders(env.TARGET_HEADERS);
 
   return urls.map((url, i) => {
-    const targetId = `target-${i + 1}`;
+    const n = i + 1;
+    const sigHeader = env[`TARGET_${n}_SIGNATURE_HEADER`];
+    const sigSecret = env[`TARGET_${n}_SIGNATURE_SECRET`];
+    const sigAlg = env[`TARGET_${n}_SIGNATURE_ALGORITHM`];
+    const signature = (sigHeader && sigSecret)
+      ? { header: sigHeader, secret: sigSecret, algorithm: sigAlg || 'sha256' }
+      : null;
+    // TARGET_N_ENDPOINTS: comma-separated list of endpoint paths, empty = all
+    const epRaw = env[`TARGET_${n}_ENDPOINTS`] || '';
+    const endpoints = epRaw.split(',').map(p => p.trim()).filter(Boolean);
+    const targetId = `target-${n}`;
     return {
       id: targetId,
       url,
@@ -66,8 +79,53 @@ function buildTargets(fileConfig, env) {
       transform: null,
       rateLimit: null,
       enabled: true,
+      signature,
+      endpoints,
     };
   });
+}
+
+/**
+ * Build the list of webhook receiver endpoints.
+ *
+ * Priority (highest → lowest):
+ *   1. config.json `endpoints` array  – full control, per-endpoint target overrides
+ *   2. WEBHOOK_PATHS env var           – comma-separated extra paths, all use global targets
+ *   3. WEBHOOK_PATH / webhookPath      – single primary path (legacy / default)
+ */
+function buildEndpoints(fileConfig, env) {
+  // File-based endpoints with optional per-endpoint target lists
+  if (fileConfig.endpoints && Array.isArray(fileConfig.endpoints)) {
+    return fileConfig.endpoints.map((ep, epIdx) => ({
+      path: ep.path,
+      // null means "inherit global targets" at runtime
+      targets: ep.targets
+        ? ep.targets.map((t, i) => ({
+            id: t.id || `ep${epIdx + 1}-target-${i + 1}`,
+            url: t.url,
+            headers: t.headers || {},
+            auth: t.auth || null,
+            transform: t.transform || null,
+            rateLimit: t.rateLimit || null,
+            enabled: t.enabled !== false,
+            signature: t.signature || null,
+            endpoints: Array.isArray(t.endpoints) ? t.endpoints : [],
+          }))
+        : null,
+    }));
+  }
+
+  // Build from env vars
+  const primaryPath = env.WEBHOOK_PATH || fileConfig.webhookPath || '/webhook';
+  const extraPaths = (env.WEBHOOK_PATHS || '')
+    .split(',')
+    .map(p => p.trim())
+    .filter(p => p && p !== primaryPath);
+
+  return [
+    { path: primaryPath, targets: null },
+    ...extraPaths.map(path => ({ path, targets: null })),
+  ];
 }
 
 function loadConfig() {
@@ -75,10 +133,13 @@ function loadConfig() {
   const env = process.env;
 
   const targets = buildTargets(fileConfig, env);
+  const endpoints = buildEndpoints(fileConfig, env);
 
   return {
     port: parseInt(env.PORT || fileConfig.port || '3000', 10),
-    webhookPath: env.WEBHOOK_PATH || fileConfig.webhookPath || '/webhook',
+    // Primary webhook path kept for backward compat (equals endpoints[0].path)
+    webhookPath: endpoints[0]?.path || env.WEBHOOK_PATH || fileConfig.webhookPath || '/webhook',
+    endpoints,
     targets,
 
     retry: parseRetryConfig(env.RETRY_CONFIG || fileConfig.retry),

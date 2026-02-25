@@ -2,7 +2,27 @@
   "_comment": "Rename this file to config.json to use it. Settings here are overridden by environment variables.",
 
   "port": 3000,
+
+  "_comment_webhookPath": "Single path (legacy). Ignored when 'endpoints' is set.",
   "webhookPath": "/webhook",
+
+  "_comment_endpoints": "Multiple receiver endpoints. Each can optionally override targets; omit 'targets' to use the global list.",
+  "endpoints": [
+    { "path": "/webhook" },
+    { "path": "/webhook/jessco" },
+    {
+      "path": "/webhook/slack",
+      "_comment": "This endpoint has its own targets instead of the global ones",
+      "targets": [
+        {
+          "id": "slack-specific",
+          "url": "https://hooks.slack.com/services/XXX/YYY/ZZZ",
+          "enabled": true
+        }
+      ]
+    }
+  ],
+
   "logLevel": "info",
 
   "retry": {
@@ -84,6 +104,16 @@
       "enabled": false,
       "headers": {
         "X-Source": "webhook-forwarder"
+      }
+    },
+    {
+      "id": "jessco",
+      "url": "https://your-jessco-api.example.com/webhooks",
+      "enabled": true,
+      "signature": {
+        "header": "x-jessco-signature",
+        "secret": "YOUR_JESSCO_WEBHOOK_SECRET",
+        "algorithm": "sha256"
       }
     }
   ]
