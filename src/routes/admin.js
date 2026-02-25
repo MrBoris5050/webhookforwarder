@@ -530,7 +530,7 @@ router.get('/dlq/view', async (req, res) => {
       <td>
         <div style="display:flex;gap:.4rem">
           <button class="btn btn-success btn-sm" onclick="retryEntry('${e.id}')">↺ Retry</button>
-          <button class="btn btn-ghost btn-sm" onclick="viewPayload('${e.id}', ${JSON.stringify(JSON.stringify(e.payload, null, 2))})">View</button>
+          <button class="btn btn-ghost btn-sm" onclick="viewDlqPayload('${e.id}')">View</button>
           <button class="btn btn-danger btn-sm" onclick="deleteEntry('${e.id}')">✕</button>
         </div>
       </td>
@@ -581,15 +581,32 @@ router.get('/dlq/view', async (req, res) => {
 </div>`;
 
   const scripts = `<script>
-function viewPayload(id, json) {
-  document.getElementById('modal-title').textContent = 'Payload — ' + id;
-  let parsed = json;
-  try { parsed = JSON.stringify(JSON.parse(json), null, 2); } catch(e) {}
-  document.getElementById('modal-body').textContent = parsed || '(empty)';
-  document.getElementById('modal').classList.add('open');
-}
 function closeModal() { document.getElementById('modal').classList.remove('open'); }
 document.addEventListener('keydown', e => { if(e.key==='Escape') closeModal(); });
+
+async function viewDlqPayload(id) {
+  document.getElementById('modal-title').textContent = 'DLQ Entry — ' + id.slice(0, 12) + '…';
+  document.getElementById('modal-body').textContent = 'Loading…';
+  document.getElementById('modal').classList.add('open');
+  try {
+    const r = await fetch('/admin/dlq/' + id);
+    if (!r.ok) throw new Error('Not found (status ' + r.status + ')');
+    const entry = await r.json();
+    const display = {
+      id:        entry.id,
+      targetId:  entry.targetId,
+      targetUrl: entry.targetUrl,
+      error:     entry.error,
+      statusCode:entry.statusCode,
+      attempts:  entry.attempts,
+      failedAt:  entry.failedAt,
+      payload:   entry.payload,
+    };
+    document.getElementById('modal-body').textContent = JSON.stringify(display, null, 2);
+  } catch(e) {
+    document.getElementById('modal-body').textContent = 'Error: ' + e.message;
+  }
+}
 
 async function retryEntry(id) {
   const btn = event.target;
@@ -607,11 +624,14 @@ async function deleteEntry(id) {
 
 async function clearDLQ() {
   if (!confirm('Clear the entire DLQ? This cannot be undone.')) return;
-  const entries = document.querySelectorAll('tr[id^="dlq-"]');
-  for (const row of entries) {
-    const id = row.id.replace('dlq-', '');
-    await fetch('/admin/dlq/' + id, { method: 'DELETE' });
-    row.remove();
+  const btn = event.target;
+  btn.disabled = true; btn.textContent = '…';
+  const r = await fetch('/admin/dlq', { method: 'DELETE' });
+  if (r.ok) {
+    location.reload();
+  } else {
+    btn.disabled = false; btn.textContent = 'Clear All';
+    alert('Failed to clear DLQ');
   }
 }
 </script>`;
@@ -643,7 +663,7 @@ router.get('/webhooks/view', async (req, res) => {
       <td>
         <div style="display:flex;gap:.4rem">
           <button class="btn btn-primary btn-sm" onclick="replayWebhook('${w.requestId}', this)">▶ Replay</button>
-          <button class="btn btn-ghost btn-sm" onclick="viewPayload(${JSON.stringify(JSON.stringify(w.body, null, 2))}, '${w.requestId}')">View</button>
+          <button class="btn btn-ghost btn-sm" onclick="viewWebhook('${w.requestId}')">View</button>
         </div>
       </td>
     </tr>`;
@@ -688,13 +708,6 @@ router.get('/webhooks/view', async (req, res) => {
 <div id="toast" style="position:fixed;bottom:1.5rem;right:1.5rem;background:var(--surface);border:1px solid var(--border2);border-radius:8px;padding:.75rem 1.1rem;font-size:.82rem;display:none;z-index:300;box-shadow:0 4px 20px #0006"></div>`;
 
   const scripts = `<script>
-function viewPayload(json, requestId) {
-  document.getElementById('modal-title').textContent = 'Payload — ' + requestId;
-  let parsed = json;
-  try { parsed = JSON.stringify(JSON.parse(json), null, 2); } catch(e) {}
-  document.getElementById('modal-body').textContent = parsed || '(empty)';
-  document.getElementById('modal').classList.add('open');
-}
 function closeModal() { document.getElementById('modal').classList.remove('open'); }
 document.addEventListener('keydown', e => { if(e.key==='Escape') closeModal(); });
 
@@ -706,10 +719,34 @@ function showToast(msg, ok = true) {
   setTimeout(() => { t.style.display = 'none'; }, 3000);
 }
 
+async function viewWebhook(requestId) {
+  document.getElementById('modal-title').textContent = 'Webhook — ' + requestId.slice(0, 12) + '…';
+  document.getElementById('modal-body').textContent = 'Loading…';
+  document.getElementById('modal').classList.add('open');
+  try {
+    const epPath = window._primaryEndpoint || '/webhook';
+    const r = await fetch(epPath + '/' + requestId);
+    if (!r.ok) { document.getElementById('modal-body').textContent = 'Not found (status ' + r.status + ')'; return; }
+    const data = await r.json();
+    const display = {
+      endpoint:    data.endpointPath  || '—',
+      receivedAt:  data.receivedAt    || '—',
+      method:      data.method        || '—',
+      contentType: data.headers?.['content-type'] || '—',
+      body:        data.body,
+      query:       Object.keys(data.query || {}).length ? data.query : undefined,
+    };
+    document.getElementById('modal-body').textContent = JSON.stringify(display, null, 2);
+  } catch(e) {
+    document.getElementById('modal-body').textContent = 'Error: ' + e.message;
+  }
+}
+
 async function replayWebhook(requestId, btn) {
   btn.disabled = true; btn.textContent = '…';
   try {
-    const r = await fetch('/webhook/' + requestId + '/replay', { method: 'POST' });
+    const epPath = window._primaryEndpoint || '/webhook';
+    const r = await fetch(epPath + '/' + requestId + '/replay', { method: 'POST' });
     if (r.ok) {
       btn.textContent = '✓ Sent';
       btn.style.background = 'var(--green-dim)';
@@ -724,6 +761,8 @@ async function replayWebhook(requestId, btn) {
     showToast('Network error', false);
   }
 }
+
+window._primaryEndpoint = ${JSON.stringify(config.webhookPath)};
 </script>`;
 
   res.setHeader('Content-Type', 'text/html');
@@ -757,6 +796,18 @@ router.get('/dlq', async (req, res) => {
   const total = await dlq.count();
   const entries = await dlq.list(limit, offset);
   res.json({ total, entries });
+});
+
+router.get('/dlq/:id', async (req, res) => {
+  const entry = await dlq.get(req.params.id);
+  if (!entry) return res.status(404).json({ error: 'DLQ entry not found' });
+  res.json(entry);
+});
+
+router.delete('/dlq', async (req, res) => {
+  await dlq.clear();
+  logger.info('dlq_cleared', { requestId: req.requestId });
+  res.json({ cleared: true });
 });
 
 router.delete('/dlq/:id', async (req, res) => {

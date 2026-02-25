@@ -218,3 +218,29 @@ GitHub’s repo webhooks send a signature in `X-Hub-Signature-256`, not a custom
 
 **Webhook URL:** `https://app.bundlesharer.net/webhook`  
 **Admin dashboard:** `https://app.bundlesharer.net/admin/stats/html`
+
+
+
+
+<!-- 
+   cd /var/www/webhookforwarder
+   git pull origin main
+   pm2 restart webhook-forwarder -->
+   <!-- cd /var/www/webhookforwarder
+npm run deploy
+
+# Remove the nested clone if it exists
+rm -rf /var/www/webhookforwarder/webhookforwarder
+
+# If /var/www/webhookforwarder is empty or not a git repo, clone into it directly:
+cd /var/www
+rm -rf webhookforwarder   # only if you're okay re-cloning
+git clone https://github.com/MrBoris5050/webhookforwarder.git webhookforwarder
+cd /var/www/webhookforwarder
+
+cd /var/www/webhookforwarder
+chmod +x deploy/deploy.sh
+cp .env.example .env   # or create .env and set PORT, MONGODB_URI, ADMIN_PASSWORD, etc.
+npm install --production
+pm2 start src/index.js --name webhook-forwarder
+pm2 save -->
