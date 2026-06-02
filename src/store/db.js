@@ -31,7 +31,106 @@ async function ensureIndexes() {
   await database.collection('webhooks').createIndex({ saved_at: 1 });
   await database.collection('dlq').createIndex({ failed_at: -1 });
   await database.collection('activity_logs').createIndex({ created_at: -1 });
-  await database.collection('activity_logs').createIndex({ target_id: 1 });
+  await database.collection('activity_logs').createIndex({ status: 1, created_at: -1 });
+}
+
+function mapActivityDoc(doc) {
+  return {
+    requestId: doc.request_id,
+    targetId: doc.target_id,
+    status: doc.status,
+    error: doc.error,
+    statusCode: doc.status_code,
+    durationMs: doc.duration_ms,
+    timestamp: doc.created_at,
+  };
+}
+
+function mapTargetStatDoc(doc) {
+  const totalAttempts = doc.total_attempts || 0;
+  const totalResponseMs = doc.total_response_ms || 0;
+  return {
+    id: doc._id,
+    success: doc.success || 0,
+    failure: doc.failure || 0,
+    lastSuccess: doc.last_success || null,
+    lastFailure: doc.last_failure || null,
+    totalAttempts,
+    avgResponseMs: totalAttempts > 0 ? Math.round(totalResponseMs / totalAttempts) : 0,
+  };
+}
+
+let targetStatsBackfillPromise = null;
+
+/** One-time migration: aggregate legacy activity_logs into target_stats. */
+async function backfillTargetStatsIfNeeded(database) {
+  const statsRow = await database.collection('stats').findOne({ _id: 'singleton' });
+  if (statsRow?.target_stats_backfilled) return;
+
+  const [targetCount, logCount] = await Promise.all([
+    database.collection('target_stats').countDocuments(),
+    database.collection('activity_logs').countDocuments(),
+  ]);
+
+  if (targetCount > 0 || logCount === 0) {
+    await database.collection('stats').updateOne(
+      { _id: 'singleton' },
+      { $set: { target_stats_backfilled: true } },
+      { upsert: true }
+    );
+    return;
+  }
+
+  const agg = await database.collection('activity_logs').aggregate([
+    {
+      $group: {
+        _id: '$target_id',
+        success: { $sum: { $cond: [{ $eq: ['$status', 'success'] }, 1, 0] } },
+        failure: { $sum: { $cond: [{ $eq: ['$status', 'failure'] }, 1, 0] } },
+        last_success: { $max: { $cond: [{ $eq: ['$status', 'success'] }, '$created_at', null] } },
+        last_failure: { $max: { $cond: [{ $eq: ['$status', 'failure'] }, '$created_at', null] } },
+        total_attempts: { $sum: 1 },
+        total_response_ms: { $sum: { $ifNull: ['$duration_ms', 0] } },
+      },
+    },
+  ]).toArray();
+
+  if (agg.length > 0) {
+    await database.collection('target_stats').bulkWrite(
+      agg.map(row => ({
+        updateOne: {
+          filter: { _id: row._id },
+          update: {
+            $set: {
+              success: row.success || 0,
+              failure: row.failure || 0,
+              last_success: row.last_success || null,
+              last_failure: row.last_failure || null,
+              total_attempts: row.total_attempts || 0,
+              total_response_ms: row.total_response_ms || 0,
+            },
+          },
+          upsert: true,
+        },
+      }))
+    );
+  }
+
+  await database.collection('stats').updateOne(
+    { _id: 'singleton' },
+    { $set: { target_stats_backfilled: true } },
+    { upsert: true }
+  );
+}
+
+function ensureTargetStatsBackfilled() {
+  if (!targetStatsBackfillPromise) {
+    targetStatsBackfillPromise = backfillTargetStatsIfNeeded(getDb()).catch((err) => {
+      targetStatsBackfillPromise = null;
+      throw err;
+    });
+  }
+  return targetStatsBackfillPromise;
 }
 
 function normalizeHeaders(headers) {
@@ -202,16 +301,48 @@ async function clearDlq() {
 
 // ─── Activity logs & stats ────────────────────────────────────────
 
+async function updateTargetStats(entry) {
+  const isSuccess = entry.status === 'success';
+  const isFailure = entry.status === 'failure';
+  const ts = entry.timestamp || new Date().toISOString();
+  const durationMs = entry.durationMs ?? 0;
+
+  const $inc = {
+    total_attempts: 1,
+    total_response_ms: durationMs,
+  };
+  if (isSuccess) $inc.success = 1;
+  if (isFailure) $inc.failure = 1;
+
+  const $set = {};
+  if (isSuccess) $set.last_success = ts;
+  if (isFailure) $set.last_failure = ts;
+
+  const update = { $inc };
+  if (Object.keys($set).length > 0) update.$set = $set;
+
+  await getDb().collection('target_stats').updateOne(
+    { _id: entry.targetId },
+    update,
+    { upsert: true }
+  );
+}
+
 async function insertActivity(entry) {
-  await getDb().collection('activity_logs').insertOne({
+  const createdAt = entry.timestamp || new Date().toISOString();
+  const doc = {
     request_id: entry.requestId,
     target_id: entry.targetId,
     status: entry.status,
     error: entry.error ?? null,
     status_code: entry.statusCode ?? null,
     duration_ms: entry.durationMs ?? null,
-    created_at: entry.timestamp || new Date().toISOString(),
-  });
+    created_at: createdAt,
+  };
+  await Promise.all([
+    getDb().collection('activity_logs').insertOne(doc),
+    updateTargetStats({ ...entry, timestamp: createdAt }),
+  ]);
 }
 
 async function incrementReceived() {
@@ -233,87 +364,48 @@ async function incrementReceived() {
 
 async function getStatsSummary() {
   const database = getDb();
-  const statsRow = await database.collection('stats').findOne({ _id: 'singleton' });
+  await ensureTargetStatsBackfilled();
+
+  const [statsRow, targetDocs, recentActivity, recentFailures] = await Promise.all([
+    database.collection('stats').findOne({ _id: 'singleton' }),
+    database.collection('target_stats').find({}).toArray(),
+    database.collection('activity_logs')
+      .find({})
+      .sort({ created_at: -1 })
+      .limit(20)
+      .toArray(),
+    database.collection('activity_logs')
+      .find({ status: 'failure' })
+      .sort({ created_at: -1 })
+      .limit(20)
+      .toArray(),
+  ]);
+
   const startTime = statsRow?.start_time ? new Date(statsRow.start_time) : new Date();
   const totalReceived = statsRow?.total_received ?? 0;
   const uptimeSec = Math.floor((Date.now() - startTime.getTime()) / 1000);
-
-  const agg = await database.collection('activity_logs').aggregate([
-    {
-      $group: {
-        _id: '$target_id',
-        success: { $sum: { $cond: [{ $eq: ['$status', 'success'] }, 1, 0] } },
-        failure: { $sum: { $cond: [{ $eq: ['$status', 'failure'] }, 1, 0] } },
-        last_success: { $max: { $cond: [{ $eq: ['$status', 'success'] }, '$created_at', null] } },
-        last_failure: { $max: { $cond: [{ $eq: ['$status', 'failure'] }, '$created_at', null] } },
-        total_attempts: { $sum: 1 },
-        total_response_ms: { $sum: { $ifNull: ['$duration_ms', 0] } },
-      },
-    },
-  ]).toArray();
-
-  const targets = agg.map(row => {
-    const totalAttempts = row.total_attempts || 0;
-    const totalResponseMs = row.total_response_ms || 0;
-    return {
-      id: row._id,
-      success: row.success || 0,
-      failure: row.failure || 0,
-      lastSuccess: row.last_success || null,
-      lastFailure: row.last_failure || null,
-      totalAttempts,
-      avgResponseMs: totalAttempts > 0 ? Math.round(totalResponseMs / totalAttempts) : 0,
-    };
-  });
-
-  const recentActivity = await database.collection('activity_logs')
-    .find({})
-    .sort({ created_at: -1 })
-    .limit(20)
-    .toArray();
-  const recentActivityMapped = recentActivity.map(doc => ({
-    requestId: doc.request_id,
-    targetId: doc.target_id,
-    status: doc.status,
-    error: doc.error,
-    statusCode: doc.status_code,
-    durationMs: doc.duration_ms,
-    timestamp: doc.created_at,
-  }));
-
-  const recentFailures = await database.collection('activity_logs')
-    .find({ status: 'failure' })
-    .sort({ created_at: -1 })
-    .limit(20)
-    .toArray();
-  const recentFailuresMapped = recentFailures.map(doc => ({
-    requestId: doc.request_id,
-    targetId: doc.target_id,
-    status: doc.status,
-    error: doc.error,
-    statusCode: doc.status_code,
-    durationMs: doc.duration_ms,
-    timestamp: doc.created_at,
-  }));
 
   return {
     uptime: `${uptimeSec}s`,
     startTime: startTime.toISOString(),
     totalReceived,
-    targets,
-    recentFailures: recentFailuresMapped,
-    recentActivity: recentActivityMapped,
+    targets: targetDocs.map(mapTargetStatDoc),
+    recentFailures: recentFailures.map(mapActivityDoc),
+    recentActivity: recentActivity.map(mapActivityDoc),
   };
 }
 
 async function resetStats() {
   const database = getDb();
-  await database.collection('stats').updateOne(
-    { _id: 'singleton' },
-    { $set: { total_received: 0, start_time: new Date() } },
-    { upsert: true }
-  );
-  await database.collection('activity_logs').deleteMany({});
+  await Promise.all([
+    database.collection('stats').updateOne(
+      { _id: 'singleton' },
+      { $set: { total_received: 0, start_time: new Date(), target_stats_backfilled: true } },
+      { upsert: true }
+    ),
+    database.collection('activity_logs').deleteMany({}),
+    database.collection('target_stats').deleteMany({}),
+  ]);
 }
 
 async function close() {

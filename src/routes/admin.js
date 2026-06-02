@@ -266,8 +266,10 @@ ${scripts}
 ═══════════════════════════════════════════════════════════════ */
 
 router.get('/stats/html', async (req, res) => {
-  const summary  = await stats.getSummary();
-  const dlqCount = await dlq.count();
+  const [summary, dlqCount] = await Promise.all([
+    stats.getSummary(),
+    dlq.count(),
+  ]);
   const pending  = retryQueue.pendingCount;
   const allTargets = config.targets;
 
@@ -774,9 +776,11 @@ window._primaryEndpoint = ${JSON.stringify(config.webhookPath)};
 ═══════════════════════════════════════════════════════════════ */
 
 router.get('/stats', async (req, res) => {
-  const summary = await stats.getSummary();
-  const dlqCount = await dlq.count();
-  const webhookCount = await webhookStore.count();
+  const [summary, dlqCount, webhookCount] = await Promise.all([
+    stats.getSummary(),
+    dlq.count(),
+    webhookStore.count(),
+  ]);
   res.json({
     ...summary,
     retryQueue:   { pending: retryQueue.pendingCount },
