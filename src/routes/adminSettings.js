@@ -11,6 +11,7 @@ const dlq = require('../store/deadLetterQueue');
 const db = require('../store/db');
 const { updateEnvFile } = require('../utils/envFile');
 const { logger } = require('../middleware/logger');
+const { annotateEndpoint, endpointLabel, ensureKnownSources, isLiveEndpoint } = require('../sources');
 
 const router = express.Router();
 
@@ -21,6 +22,7 @@ function adminNav(activePage) {
     { href: '/admin/settings',      label: '⚙️ Settings'  },
     { href: '/admin/dlq/view',      label: '📭 DLQ'       },
     { href: '/admin/webhooks/view', label: '🗂 Webhooks'  },
+    { href: '/admin/webhooks/view?tab=live', label: '📡 Live logs' },
   ];
   const navItems = links.map(l =>
     `<a href="${l.href}" class="nav-link ${l.href === activePage ? 'nav-active' : ''}">${l.label}</a>`
@@ -66,13 +68,36 @@ function targetRowsForForm() {
 }
 
 function endpointRowsForForm() {
-  const rows = config.endpoints.map((ep, i) => ({ index: i, path: ep.path, hasCustomTargets: Boolean(ep.targets) }));
-  // Extra empty row for adding a new endpoint
-  rows.push({ index: config.endpoints.length, path: '', hasCustomTargets: false });
+  const rows = config.endpoints.map((ep, i) => ({
+    index: i,
+    path: ep.path,
+    name: endpointLabel(ep),
+    live: isLiveEndpoint(ep),
+    hasCustomTargets: Boolean(ep.targets),
+  }));
+  // Extra empty row for adding a new fire-and-forget endpoint
+  rows.push({ index: config.endpoints.length, path: '', name: '', live: false, hasCustomTargets: false });
   return rows;
 }
 
-function renderPage({ flash, values } = {}) {
+function receiveFromChecks(row, endpoints, live) {
+  const list = endpoints.filter(ep => isLiveEndpoint(ep) === live);
+  if (list.length === 0) {
+    return `<span class="ep-all-badge">${live ? 'No live sources configured yet' : 'No fire-and-forget endpoints configured yet'}</span>`;
+  }
+  return list.map(ep => {
+    const checked = (row.endpoints || []).includes(ep.path);
+    const label = endpointLabel(ep);
+    return `<label class="ep-check-label${checked ? ' checked' : ''}">
+      <input type="checkbox" name="target_${row.index}_endpoints" value="${escapeHtml(ep.path)}"${checked ? ' checked' : ''}
+        onchange="this.closest('.ep-check-label').classList.toggle('checked', this.checked)">
+      ${escapeHtml(label)}${label !== ep.path ? ` <span class="hint">${escapeHtml(ep.path)}</span>` : ''}
+    </label>`;
+  }).join('');
+}
+
+function renderPage({ flash, values, activeTab } = {}) {
+  const tab = activeTab === 'live' ? 'live' : 'faf';
   const v = values || {
     targetUrls: currentTargetUrls(),
     timeoutMs: config.timeout,
@@ -85,6 +110,9 @@ function renderPage({ flash, values } = {}) {
     targetRows: targetRowsForForm(),
     endpointRows: endpointRowsForForm(),
   };
+  const allEpRows = v.endpointRows || endpointRowsForForm();
+  const fafRows = allEpRows.filter(row => !row.live);
+  const liveRows = allEpRows.filter(row => row.live);
 
   const flashHtml = flash
     ? `<div class="flash flash-${flash.type}">${flash.message}</div>`
@@ -182,6 +210,15 @@ function renderPage({ flash, values } = {}) {
   .endpoint-row-badge-custom { background: #1a2e1a; color: #4ade80; }
   .endpoint-row input[type="text"] { flex: 1; }
   .endpoint-row-url { font-size: .72rem; color: #475569; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; font-family: ui-monospace, monospace; }
+
+  /* ── Settings tabs ── */
+  .settings-tabs { display: flex; gap: .4rem; margin-bottom: 1.5rem; background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: .35rem; }
+  .tab-btn { flex: 1; background: transparent; border: none; color: #94a3b8; font-size: .85rem; font-weight: 600; padding: .65rem .9rem; border-radius: 7px; cursor: pointer; }
+  .tab-btn:hover { color: #e2e8f0; }
+  .tab-btn.active { background: #0f172a; color: #93c5fd; box-shadow: inset 0 0 0 1px #1e3a5f; }
+  form[data-tab="faf"] .panel-live { display: none; }
+  form[data-tab="live"] .panel-faf { display: none; }
+  .ep-group-title { font-size: .72rem; font-weight: 600; color: #64748b; text-transform: uppercase; letter-spacing: .04em; margin-bottom: .35rem; }
 </style>
 </head>
 <body>
@@ -197,33 +234,67 @@ function renderPage({ flash, values } = {}) {
 
   ${flashHtml}
 
-  <form method="POST" action="/admin/settings">
+  <form id="settings-form" method="POST" action="/admin/settings" data-tab="${tab}">
+    <input type="hidden" name="activeTab" id="activeTab" value="${tab}">
 
-    <!-- Webhook Endpoints -->
-    <div class="card">
+    <div class="settings-tabs" role="tablist">
+      <button type="button" class="tab-btn${tab === 'faf' ? ' active' : ''}" data-tab="faf" onclick="setSettingsTab('faf')">Fire-and-forget</button>
+      <button type="button" class="tab-btn${tab === 'live' ? ' active' : ''}" data-tab="live" onclick="setSettingsTab('live')">Live request/response</button>
+    </div>
+
+    <!-- Fire-and-forget endpoints -->
+    <div class="card panel-faf">
       <div class="card-header">
         <span class="card-icon">🔗</span>
         <div>
           <h2>Webhook Endpoints</h2>
-          <p>Paths that accept incoming webhooks. All endpoints forward to the global targets below. Changes apply immediately.</p>
+          <p>Accept a payload, respond 202, then forward to targets in the background.</p>
         </div>
       </div>
       <div class="card-body">
-        ${(v.endpointRows || endpointRowsForForm()).map(row => `
+        ${fafRows.map(row => `
         <div class="endpoint-row">
           <span class="endpoint-row-num">
-            ${row.index === 0 ? 'Primary' : `Path ${row.index + 1}`}
-            ${row.index === 0 ? '<span class="endpoint-row-badge">default</span>' : ''}
+            ${row.path === config.webhookPath ? 'Primary' : (row.name && row.name !== row.path ? escapeHtml(row.name) : (row.path ? `Path ${row.index + 1}` : 'New'))}
+            ${row.path === config.webhookPath ? '<span class="endpoint-row-badge">default</span>' : ''}
             ${row.hasCustomTargets ? '<span class="endpoint-row-badge endpoint-row-badge-custom">custom targets</span>' : ''}
           </span>
           <input type="text" name="endpoint_${row.index}_path"
             value="${escapeHtml(row.path)}"
-            placeholder="${row.index === 0 ? '/webhook' : '/webhook/my-source'}"
+            placeholder="${row.path === config.webhookPath ? '/webhook' : '/webhook/my-source'}"
             ${row.hasCustomTargets ? 'readonly title="Targets managed via config.json"' : ''}>
           ${row.path ? `<span class="endpoint-row-url" title="POST to this path">POST ${escapeHtml(row.path)}</span>` : ''}
         </div>
         `).join('')}
-        <div class="hint">Leave path empty to remove an endpoint. The primary path is always required. Paths must start with <code style="background:#0f172a;padding:1px 4px;border-radius:4px;color:#94a3b8">/</code>. Endpoints with <span style="color:#4ade80;font-size:.7rem;font-weight:600">custom targets</span> are managed via config.json.</div>
+        <div class="hint">Leave path empty to remove an endpoint. The primary path is always required. Paths must start with <code style="background:#0f172a;padding:1px 4px;border-radius:4px;color:#94a3b8">/</code>.</div>
+      </div>
+    </div>
+
+    <!-- Live request/response endpoints -->
+    <div class="card panel-live">
+      <div class="card-header">
+        <span class="card-icon">📡</span>
+        <div>
+          <h2>Live Sources</h2>
+          <p>Wait for a target and return its response to the caller (Arkesel USSD menus, and similar).</p>
+        </div>
+      </div>
+      <div class="card-body">
+        ${liveRows.length === 0
+          ? '<span class="ep-all-badge">No live sources registered</span>'
+          : liveRows.map(row => `
+        <div class="endpoint-row">
+          <span class="endpoint-row-num">
+            ${escapeHtml(row.name || 'Live')}
+            <span class="endpoint-row-badge">live</span>
+          </span>
+          <input type="text" name="endpoint_${row.index}_path"
+            value="${escapeHtml(row.path)}"
+            readonly title="Built-in live source">
+          ${row.path ? `<span class="endpoint-row-url" title="Callback URL">POST ${escapeHtml(row.path)}</span>` : ''}
+        </div>
+        `).join('')}
+        <div class="hint">Point the Arkesel USSD callback URL at this path. The forwarder waits for a target and returns <code style="background:#0f172a;padding:1px 4px;border-radius:4px;color:#94a3b8">sessionID / message / continueSession</code> JSON. Select <strong>Arkesel USSD</strong> under Receive from on a target below. Outbound timeout is shared with the Fire-and-forget tab.</div>
       </div>
     </div>
 
@@ -261,19 +332,14 @@ function renderPage({ flash, values } = {}) {
             <input type="text" name="target_${row.index}_sig_algorithm" value="${(row.sigAlgorithm || 'sha256').replace(/"/g, '&quot;')}" placeholder="sha256">
           </div>
           <div class="field">
-            <label>Receive from <span class="hint">(leave all unchecked = receive from every endpoint)</span></label>
-            <div class="ep-checks">
-              ${config.endpoints.length === 0
-                ? '<span class="ep-all-badge">No endpoints configured yet</span>'
-                : config.endpoints.map(ep => {
-                    const checked = (row.endpoints || []).includes(ep.path);
-                    return `<label class="ep-check-label${checked ? ' checked' : ''}">
-                      <input type="checkbox" name="target_${row.index}_endpoints" value="${escapeHtml(ep.path)}"${checked ? ' checked' : ''}
-                        onchange="this.closest('.ep-check-label').classList.toggle('checked', this.checked)">
-                      ${escapeHtml(ep.path)}
-                    </label>`;
-                  }).join('')
-              }
+            <label>Receive from</label>
+            <div class="panel-faf">
+              <div class="ep-group-title">Fire-and-forget <span class="hint">(leave unchecked = every fire-and-forget endpoint)</span></div>
+              <div class="ep-checks">${receiveFromChecks(row, config.endpoints, false)}</div>
+            </div>
+            <div class="panel-live">
+              <div class="ep-group-title">Live request/response <span class="hint">(must be checked — live sources are never implied)</span></div>
+              <div class="ep-checks">${receiveFromChecks(row, config.endpoints, true)}</div>
             </div>
           </div>
         </div>
@@ -283,7 +349,7 @@ function renderPage({ flash, values } = {}) {
     </div>
 
     <!-- Request behaviour -->
-    <div class="card">
+    <div class="card panel-faf">
       <div class="card-header">
         <span class="card-icon">⏱</span>
         <div>
@@ -318,7 +384,7 @@ function renderPage({ flash, values } = {}) {
     </div>
 
     <!-- Storage limits -->
-    <div class="card">
+    <div class="card panel-faf">
       <div class="card-header">
         <span class="card-icon">💾</span>
         <div>
@@ -354,6 +420,20 @@ function renderPage({ flash, values } = {}) {
   </form>
 </main>
 
+<script>
+function setSettingsTab(tab) {
+  const form = document.getElementById('settings-form');
+  form.dataset.tab = tab;
+  document.getElementById('activeTab').value = tab;
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.tab === tab);
+  });
+  const url = new URL(window.location.href);
+  url.searchParams.set('tab', tab);
+  history.replaceState(null, '', url.pathname + url.search);
+}
+</script>
+
 </body>
 </html>`;
 }
@@ -363,6 +443,7 @@ router.get('/', async (req, res) => {
   const dlqCount = await dlq.count();
   res.setHeader('Content-Type', 'text/html');
   res.send(renderPage({
+    activeTab: req.query.tab,
     values: {
       targetRows: targetRowsForForm(),
       endpointRows: endpointRowsForForm(),
@@ -380,6 +461,7 @@ router.get('/', async (req, res) => {
 /* ─── POST ────────────────────────────────────────────────────── */
 router.post('/', async (req, res) => {
   const errors = [];
+  const activeTab = req.body.activeTab === 'live' ? 'live' : 'faf';
 
   // ── Parse target rows (target_0_url, target_0_sig_header, ...) ──
   const urlKeys = Object.keys(req.body).filter(k => /^target_\d+_url$/.test(k));
@@ -430,7 +512,7 @@ router.post('/', async (req, res) => {
     const existing = config.endpoints[i];
     if (existing?.targets) {
       // Never strip an endpoint that has per-endpoint targets — keep it as-is
-      rawEndpointPaths.push({ path: existing.path, targets: existing.targets });
+      rawEndpointPaths.push(annotateEndpoint({ path: existing.path, targets: existing.targets, name: existing.name, mode: existing.mode }));
       continue;
     }
     if (!p.startsWith('/')) {
@@ -441,12 +523,12 @@ router.post('/', async (req, res) => {
       errors.push(`Duplicate endpoint path: "${p}"`);
       continue;
     }
-    rawEndpointPaths.push({ path: p, targets: null });
+    rawEndpointPaths.push(annotateEndpoint({ path: p, targets: null, name: existing?.name, mode: existing?.mode }));
   }
   // Also carry forward any custom-target endpoints that weren't in the form
   config.endpoints.forEach(ep => {
     if (ep.targets && !rawEndpointPaths.some(e => e.path === ep.path)) {
-      rawEndpointPaths.push({ path: ep.path, targets: ep.targets });
+      rawEndpointPaths.push(annotateEndpoint({ path: ep.path, targets: ep.targets, name: ep.name, mode: ep.mode }));
     }
   });
 
@@ -492,12 +574,19 @@ router.post('/', async (req, res) => {
 
     const endpointRows = [];
     for (let i = 0; i <= maxEpIndex; i++) {
-      endpointRows.push({ index: i, path: req.body[`endpoint_${i}_path`] || '', hasCustomTargets: Boolean(config.endpoints[i]?.targets) });
+      endpointRows.push({
+        index: i,
+        path: req.body[`endpoint_${i}_path`] || '',
+        name: config.endpoints[i]?.name || '',
+        live: isLiveEndpoint(config.endpoints[i] || req.body[`endpoint_${i}_path`] || ''),
+        hasCustomTargets: Boolean(config.endpoints[i]?.targets),
+      });
     }
-    endpointRows.push({ index: endpointRows.length, path: '', hasCustomTargets: false });
+    endpointRows.push({ index: endpointRows.length, path: '', name: '', live: false, hasCustomTargets: false });
 
     res.setHeader('Content-Type', 'text/html');
     return res.status(400).send(renderPage({
+      activeTab,
       flash: { type: 'error', message: '❌ ' + errors.join(' · ') },
       values: {
         targetRows,
@@ -536,9 +625,9 @@ router.post('/', async (req, res) => {
     };
   });
 
-  // Update endpoints live
-  config.endpoints = rawEndpointPaths;
-  config.webhookPath = rawEndpointPaths[0]?.path || '/webhook';
+  // Update endpoints live (keep built-in sources such as Arkesel USSD)
+  config.endpoints = ensureKnownSources(rawEndpointPaths);
+  config.webhookPath = config.endpoints[0]?.path || '/webhook';
 
   config.timeout = timeoutMs;
   config.retry.maxAttempts = retryMaxAttempts;
@@ -551,7 +640,7 @@ router.post('/', async (req, res) => {
   dlq.maxSize = maxDlq;
 
   // ── Persist to .env and/or DB ──────────────────────────────────
-  const simplePaths = rawEndpointPaths.filter(e => !e.targets); // only env-managed paths
+  const simplePaths = config.endpoints.filter(e => !e.targets); // only env-managed paths
   const envUpdates = {
     WEBHOOK_PATH: simplePaths[0]?.path || '/webhook',
     WEBHOOK_PATHS: simplePaths.slice(1).map(e => e.path).join(','),
@@ -587,7 +676,7 @@ router.post('/', async (req, res) => {
 
   logger.info('settings_updated', {
     requestId: req.requestId,
-    endpoints: rawEndpointPaths.length,
+    endpoints: config.endpoints.length,
     targets: rawUrls.length,
     timeoutMs,
     retryMaxAttempts,
@@ -598,9 +687,10 @@ router.post('/', async (req, res) => {
 
   res.setHeader('Content-Type', 'text/html');
   res.send(renderPage({
+    activeTab,
     flash: {
       type: 'success',
-      message: `✅ Settings saved — ${rawEndpointPaths.length} endpoint${rawEndpointPaths.length !== 1 ? 's' : ''}, ${rawUrls.length} target${rawUrls.length !== 1 ? 's' : ''} configured, changes applied immediately. ${db.isEnabled() ? 'Targets stored in database.' : 'Written to .env.'}`,
+      message: `✅ Settings saved — ${config.endpoints.length} endpoint${config.endpoints.length !== 1 ? 's' : ''}, ${rawUrls.length} target${rawUrls.length !== 1 ? 's' : ''} configured, changes applied immediately. ${db.isEnabled() ? 'Targets stored in database.' : 'Written to .env.'}`,
     },
   }));
 });

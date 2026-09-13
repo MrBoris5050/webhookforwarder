@@ -4,6 +4,7 @@
  */
 const fs = require('fs');
 const path = require('path');
+const { annotateEndpoint, ensureKnownSources } = require('./sources');
 
 function loadConfigFile() {
   const configPath = path.join(process.cwd(), 'config.json');
@@ -94,10 +95,12 @@ function buildTargets(fileConfig, env) {
  *   3. WEBHOOK_PATH / webhookPath      – single primary path (legacy / default)
  */
 function buildEndpoints(fileConfig, env) {
-  // File-based endpoints with optional per-endpoint target lists
+  // File-based endpoints with optional per-endpoint target overrides
   if (fileConfig.endpoints && Array.isArray(fileConfig.endpoints)) {
-    return fileConfig.endpoints.map((ep, epIdx) => ({
+    return ensureKnownSources(fileConfig.endpoints.map((ep, epIdx) => annotateEndpoint({
       path: ep.path,
+      name: ep.name,
+      mode: ep.mode,
       // null means "inherit global targets" at runtime
       targets: ep.targets
         ? ep.targets.map((t, i) => ({
@@ -112,7 +115,7 @@ function buildEndpoints(fileConfig, env) {
             endpoints: Array.isArray(t.endpoints) ? t.endpoints : [],
           }))
         : null,
-    }));
+    })));
   }
 
   // Build from env vars
@@ -122,10 +125,10 @@ function buildEndpoints(fileConfig, env) {
     .map(p => p.trim())
     .filter(p => p && p !== primaryPath);
 
-  return [
-    { path: primaryPath, targets: null },
-    ...extraPaths.map(path => ({ path, targets: null })),
-  ];
+  return ensureKnownSources([
+    annotateEndpoint({ path: primaryPath, targets: null }),
+    ...extraPaths.map(p => annotateEndpoint({ path: p, targets: null })),
+  ]);
 }
 
 function loadConfig() {

@@ -73,6 +73,7 @@ The server starts on port **3000** by default:
 |---|---|---|
 | `PORT` | `3000` | HTTP server port |
 | `WEBHOOK_PATH` | `/webhook` | Incoming webhook path |
+| `WEBHOOK_PATHS` | — | Extra incoming paths (comma-separated). `/webhook/arkesel-ussd` is always registered |
 | `TARGET_URLS` | — | Comma-separated target URLs |
 | `TARGET_HEADERS` | `{}` | JSON object of per-target headers |
 | `REQUEST_TIMEOUT_MS` | `10000` | Per-request timeout in ms |
@@ -167,6 +168,39 @@ X-Request-Id: optional-custom-id   (optional — generated if not provided)
   "targets": 5
 }
 ```
+
+---
+
+### `POST /webhook/arkesel-ussd` (Arkesel USSD)
+
+Arkesel USSD callback. Point your USSD app's callback URL here. The forwarder waits for a target response and returns the JSON Arkesel expects (not `202 Accepted`).
+
+**Incoming payload** (from Arkesel)
+
+```json
+{
+  "sessionID": "2005506191900168",
+  "userID": "USSD_DOCUMENTATION",
+  "newSession": true,
+  "msisdn": "233271231234",
+  "userData": "*928*1#",
+  "network": "AIRTELTIGO"
+}
+```
+
+**Response `200`** (returned to Arkesel; taken from the first successful target, or a fallback)
+
+```json
+{
+  "sessionID": "2005506191900168",
+  "userID": "USSD_DOCUMENTATION",
+  "msisdn": "233271231234",
+  "message": "Welcome",
+  "continueSession": true
+}
+```
+
+Assign targets under Settings → **Live request/response** → Receive from → **Arkesel USSD**. A target may return that JSON object, or a `CON` / `END` text menu (Africa's Talking style), which is converted automatically.
 
 ---
 

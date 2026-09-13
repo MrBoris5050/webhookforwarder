@@ -10,6 +10,7 @@
   "endpoints": [
     { "path": "/webhook" },
     { "path": "/webhook/jessco" },
+    { "path": "/webhook/arkesel-ussd", "name": "Arkesel USSD" },
     {
       "path": "/webhook/slack",
       "_comment": "This endpoint has its own targets instead of the global ones",

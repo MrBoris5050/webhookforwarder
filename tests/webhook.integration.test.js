@@ -92,6 +92,96 @@ describe('GET /admin/stats', () => {
   });
 });
 
+describe('POST /webhook/arkesel-ussd', () => {
+  let previousEndpoints;
+
+  beforeAll(() => {
+    const cfg = require('../src/config');
+    previousEndpoints = cfg.targets.map(t => t.endpoints);
+    cfg.targets.forEach(t => { t.endpoints = ['/webhook/arkesel-ussd']; });
+  });
+
+  afterAll(() => {
+    const cfg = require('../src/config');
+    cfg.targets.forEach((t, i) => { t.endpoints = previousEndpoints[i]; });
+  });
+
+  const ussdPayload = {
+    sessionID: '2005506191900168',
+    userID: 'USSD_DOCUMENTATION',
+    newSession: true,
+    msisdn: '233271231234',
+    userData: '*928*1#',
+    network: 'AIRTELTIGO',
+  };
+
+  it('returns Arkesel USSD JSON from the first successful target', async () => {
+    nock('http://target1.example.com').post('/hook').reply(200, {
+      sessionID: ussdPayload.sessionID,
+      userID: ussdPayload.userID,
+      msisdn: ussdPayload.msisdn,
+      message: 'Welcome to MyApp',
+      continueSession: true,
+    });
+    nock('http://target2.example.com').post('/hook').reply(200, { ok: true });
+
+    const res = await request(app)
+      .post('/webhook/arkesel-ussd')
+      .send(ussdPayload)
+      .set('Content-Type', 'application/json');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      sessionID: ussdPayload.sessionID,
+      userID: ussdPayload.userID,
+      msisdn: ussdPayload.msisdn,
+      message: 'Welcome to MyApp',
+      continueSession: true,
+    });
+  });
+
+  it('returns a fallback END menu when no target answers', async () => {
+    nock('http://target1.example.com').post('/hook').reply(500);
+    nock('http://target2.example.com').post('/hook').reply(500);
+
+    const res = await request(app)
+      .post('/webhook/arkesel-ussd')
+      .send(ussdPayload);
+
+    expect(res.status).toBe(200);
+    expect(res.body.sessionID).toBe(ussdPayload.sessionID);
+    expect(res.body.continueSession).toBe(false);
+    expect(res.body.message).toMatch(/unavailable/i);
+  });
+
+  it('stores a request/response transcript', async () => {
+    nock('http://target1.example.com').post('/hook').reply(200, {
+      message: 'Pick an option',
+      continueSession: true,
+    });
+    nock('http://target2.example.com').post('/hook').reply(200, { ok: true });
+
+    const res = await request(app)
+      .post('/webhook/arkesel-ussd')
+      .send(ussdPayload);
+
+    const stored = await request(app).get(`/admin/webhooks/${res.headers['x-request-id']}`);
+    expect(stored.status).toBe(200);
+    expect(stored.body.body).toMatchObject({
+      sessionID: ussdPayload.sessionID,
+      userData: ussdPayload.userData,
+    });
+    expect(stored.body.response).toEqual({
+      sessionID: ussdPayload.sessionID,
+      userID: ussdPayload.userID,
+      msisdn: ussdPayload.msisdn,
+      message: 'Pick an option',
+      continueSession: true,
+    });
+    expect(stored.body.liveFallback).toBe(false);
+  });
+});
+
 describe('Webhook replay', () => {
   it('can retrieve a stored webhook by requestId', async () => {
     nock('http://target1.example.com').post('/hook').reply(200);

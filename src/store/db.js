@@ -155,6 +155,10 @@ async function saveWebhook(requestId, data) {
     received_at: data.receivedAt || null,
     method: data.method || 'POST',
     query: data.query || null,
+    endpoint_path: data.endpointPath || null,
+    response: data.response ?? null,
+    live_outcomes: data.liveOutcomes ?? null,
+    live_fallback: data.liveFallback ?? null,
     saved_at: savedAt,
   };
   await database.collection('webhooks').replaceOne({ _id: requestId }, doc, { upsert: true });
@@ -176,6 +180,10 @@ async function saveWebhook(requestId, data) {
 async function getWebhook(requestId) {
   const doc = await getDb().collection('webhooks').findOne({ _id: requestId });
   if (!doc) return null;
+  return mapWebhookDoc(doc);
+}
+
+function mapWebhookDoc(doc) {
   return {
     requestId: doc._id,
     body: doc.body,
@@ -183,6 +191,10 @@ async function getWebhook(requestId) {
     receivedAt: doc.received_at,
     method: doc.method,
     query: doc.query,
+    endpointPath: doc.endpoint_path || null,
+    response: doc.response ?? null,
+    liveOutcomes: doc.live_outcomes ?? null,
+    liveFallback: doc.live_fallback ?? null,
     savedAt: doc.saved_at instanceof Date ? doc.saved_at.toISOString() : doc.saved_at,
   };
 }
@@ -194,15 +206,7 @@ async function listWebhooks(limit = 50, offset = 0) {
     .skip(offset)
     .limit(limit)
     .toArray();
-  return docs.map(doc => ({
-    requestId: doc._id,
-    body: doc.body,
-    headers: doc.headers || {},
-    receivedAt: doc.received_at,
-    method: doc.method,
-    query: doc.query,
-    savedAt: doc.saved_at instanceof Date ? doc.saved_at.toISOString() : doc.saved_at,
-  }));
+  return docs.map(mapWebhookDoc);
 }
 
 async function countWebhooks() {

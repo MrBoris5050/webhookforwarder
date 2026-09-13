@@ -8,29 +8,47 @@
  *
  * Each returned router exposes:
  *   POST /                       - receive a new webhook
+ *   GET  /                       - Arkesel USSD query-string callbacks (that path only)
  *   GET  /:requestId             - retrieve a stored webhook
  *   POST /:requestId/replay      - re-forward a previously received webhook
  */
 const express = require('express');
 const { logger } = require('../middleware/logger');
 const { signatureVerifier } = require('../middleware/signatureVerifier');
-const { forwardToAllTargets } = require('../services/forwarder');
+const { forwardToAllTargets, deliverToTarget } = require('../services/forwarder');
+const arkeselUssd = require('../services/arkeselUssd');
+const { isArkeselUssd, isLiveEndpoint } = require('../sources');
 const stats = require('../store/stats');
 const webhookStore = require('../store/webhookStore');
 
+function resolveTargets(endpointPath, endpointTargets) {
+  const config = require('../config');
+  const baseTargets = endpointTargets || config.targets;
+  return baseTargets.filter(t => {
+    if (!t.enabled) return false;
+    const assigned = t.endpoints || [];
+    // Unchecked "Receive from" means every fire-and-forget source, not live USSD.
+    if (assigned.length === 0) return !isLiveEndpoint(endpointPath);
+    return assigned.includes(endpointPath);
+  });
+}
+
 function createWebhookRouter(endpointPath, endpointTargets) {
   const router = express.Router();
+  const ussdMode = isArkeselUssd(endpointPath);
+  const verify = ussdMode ? (req, res, next) => next() : signatureVerifier;
 
-  /* ── POST / ── receive a new webhook ─────────────────────────── */
-  router.post('/', signatureVerifier, async (req, res) => {
+  /* ── ingest ── receive a new webhook (POST, or GET for USSD query callbacks) */
+  async function ingest(req, res) {
     const requestId = req.requestId;
     const receivedAt = new Date().toISOString();
+    const body = ussdMode ? arkeselUssd.normalizeRequest(req) : req.body;
 
     await stats.incrementReceived();
 
     const webhookData = {
       requestId,
-      body: req.body,
+      body,
       headers: req.headers,
       receivedAt,
       method: req.method,
@@ -48,15 +66,65 @@ function createWebhookRouter(endpointPath, endpointTargets) {
       bodySize: req.headers['content-length'],
     });
 
-    // Resolve targets for this endpoint:
-    //   1. Use per-endpoint override targets if set (from config.json)
-    //   2. Otherwise use global targets, filtered to those assigned to this endpoint
-    //      (targets with an empty endpoints[] receive from all paths)
-    const config = require('../config');
-    const baseTargets = endpointTargets || config.targets;
-    const routedTargets = baseTargets.filter(t =>
-      t.enabled && (!t.endpoints || t.endpoints.length === 0 || t.endpoints.includes(endpointPath))
-    );
+    const routedTargets = resolveTargets(endpointPath, endpointTargets);
+
+    // Arkesel USSD is request/response — wait for a target and echo the menu JSON.
+    if (ussdMode) {
+      const started = Date.now();
+      let targetBody = null;
+      let outcomes = [];
+      try {
+        const results = await Promise.allSettled(
+          routedTargets.map(t => deliverToTarget(t, body, req.headers, requestId))
+        );
+        const firstOk = results.find(r => r.status === 'fulfilled' && r.value?.success);
+        targetBody = firstOk?.value?.body ?? null;
+        outcomes = results.map((r, i) => ({
+          targetId: routedTargets[i]?.id,
+          status: r.status === 'fulfilled' && r.value?.success ? 'success' : 'failed',
+          error: r.status === 'rejected' ? r.reason?.message : (r.value?.success ? undefined : `HTTP ${r.value?.status}`),
+        }));
+        logger.info('forward_complete', {
+          requestId,
+          endpoint: endpointPath,
+          mode: 'arkesel-ussd',
+          outcomes,
+        });
+      } catch (err) {
+        logger.error('forward_unexpected_error', { requestId, endpoint: endpointPath, error: err.message, stack: err.stack });
+      }
+
+      const response = arkeselUssd.buildResponse(body, targetBody);
+      const durationMs = Date.now() - started;
+      webhookData.response = response;
+      webhookData.liveOutcomes = outcomes;
+      webhookData.liveFallback = !targetBody;
+      await webhookStore.save(requestId, webhookData);
+
+      logger.info('live_response', {
+        requestId,
+        endpoint: endpointPath,
+        sessionID: body.sessionID,
+        msisdn: body.msisdn,
+        userData: body.userData,
+        continueSession: response.continueSession,
+        message: response.message,
+        fallback: !targetBody,
+        targets: routedTargets.length,
+        durationMs,
+      });
+
+      if (!targetBody) {
+        await stats.recordFailure(
+          `live:${endpointPath}`,
+          requestId,
+          { message: routedTargets.length ? 'No live target response' : 'No live target assigned' },
+          durationMs,
+        );
+      }
+
+      return res.status(200).json(response);
+    }
 
     res.status(202).json({
       accepted: true,
@@ -66,14 +134,16 @@ function createWebhookRouter(endpointPath, endpointTargets) {
       targets: routedTargets.length,
     });
 
-    // Forward asynchronously after responding
     try {
       const outcomes = await forwardToAllTargets(webhookData, routedTargets);
       logger.info('forward_complete', { requestId, endpoint: endpointPath, outcomes });
     } catch (err) {
       logger.error('forward_unexpected_error', { requestId, endpoint: endpointPath, error: err.message, stack: err.stack });
     }
-  });
+  }
+
+  router.post('/', verify, ingest);
+  if (ussdMode) router.get('/', ingest);
 
   /* ── GET /:requestId ── retrieve a stored webhook ─────────────── */
   router.get('/:requestId', async (req, res) => {
@@ -93,12 +163,8 @@ function createWebhookRouter(endpointPath, endpointTargets) {
     res.status(202).json({ accepted: true, requestId: req.requestId, replayOf: entry.requestId });
 
     try {
-      const config = require('../config');
-      const baseTargets = endpointTargets || config.targets;
       const replayPath = entry.endpointPath || endpointPath;
-      const routedTargets = baseTargets.filter(t =>
-        t.enabled && (!t.endpoints || t.endpoints.length === 0 || t.endpoints.includes(replayPath))
-      );
+      const routedTargets = resolveTargets(replayPath, endpointTargets);
       const outcomes = await forwardToAllTargets(
         { ...entry, requestId: req.requestId },
         routedTargets,

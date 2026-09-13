@@ -117,12 +117,12 @@ async function deliverToTarget(target, payload, incomingHeaders, requestId) {
         durationMs: duration,
       });
       await stats.recordFailure(target.id, requestId, { message: `HTTP ${response.status}`, statusCode: response.status }, duration);
-      return { success: false, status: response.status };
+      return { success: false, status: response.status, body: response.data };
     }
 
     logger.info('target_success', { requestId, targetId: target.id, status: response.status, durationMs: duration });
     await stats.recordSuccess(target.id, requestId, duration);
-    return { success: true, status: response.status };
+    return { success: true, status: response.status, body: response.data };
 
   } catch (err) {
     const duration = Date.now() - start;

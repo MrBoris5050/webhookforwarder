@@ -20,6 +20,7 @@ const retryQueue = require('../services/retryQueue');
 const { forwardToAllTargets } = require('../services/forwarder');
 const { logger } = require('../middleware/logger');
 const config = require('../config');
+const { endpointLabel, isLiveEndpoint } = require('../sources');
 
 const router = express.Router();
 router.use(adminAuth);
@@ -233,6 +234,7 @@ function navHtml(active) {
     { href: '/admin/settings',    label: '⚙️ Settings'  },
     { href: '/admin/dlq/view',    label: '📭 DLQ'       },
     { href: '/admin/webhooks/view', label: '🗂 Webhooks' },
+    { href: '/admin/webhooks/view?tab=live', label: '📡 Live logs' },
   ];
   return `
   <nav class="topnav">
@@ -646,22 +648,33 @@ async function clearDLQ() {
    WEBHOOKS HTML VIEW  /admin/webhooks/view
 ═══════════════════════════════════════════════════════════════ */
 
-router.get('/webhooks/view', async (req, res) => {
-  const webhooks = await webhookStore.list(100, 0);
-  const webhookCount = await webhookStore.count();
+function escapeHtml(s) {
+  if (typeof s !== 'string') return '';
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
 
-  const rows = webhooks.map(w => {
-    const bodyPreview = w.body ? JSON.stringify(w.body).slice(0, 80) : '(empty)';
-    const targetCount = config.targets.filter(t => t.enabled).length;
-    return `
+function webhookRowHtml(w) {
+  const bodyPreview = w.body ? JSON.stringify(w.body).slice(0, 80) : '(empty)';
+  const source = w.endpointPath
+    ? endpointLabel({ path: w.endpointPath })
+    : 'Webhook';
+  return `
     <tr>
       <td>
         <code style="font-size:.72rem">${w.requestId?.slice(0, 12)}…</code><br>
         <span class="text-muted" style="font-size:.7rem">${timeSince(w.receivedAt)}</span>
       </td>
       <td class="text-muted mono">${w.receivedAt ? new Date(w.receivedAt).toLocaleTimeString() : '—'}</td>
-      <td style="font-family:monospace;font-size:.72rem;color:var(--muted2);max-width:220px" class="truncate" title="${bodyPreview}">${bodyPreview}</td>
-      <td class="text-muted">${w.headers?.['content-type']?.split(';')[0] || '—'}</td>
+      <td>
+        <div style="font-size:.78rem;font-weight:600">${escapeHtml(source)}</div>
+        <div class="text-muted" style="font-size:.68rem;font-family:monospace">${escapeHtml(w.endpointPath || config.webhookPath)}</div>
+      </td>
+      <td style="font-family:monospace;font-size:.72rem;color:var(--muted2);max-width:220px" class="truncate" title="${escapeHtml(bodyPreview)}">${escapeHtml(bodyPreview)}</td>
+      <td class="text-muted">${escapeHtml(w.headers?.['content-type']?.split(';')[0] || '—')}</td>
       <td>
         <div style="display:flex;gap:.4rem">
           <button class="btn btn-primary btn-sm" onclick="replayWebhook('${w.requestId}', this)">▶ Replay</button>
@@ -669,30 +682,93 @@ router.get('/webhooks/view', async (req, res) => {
         </div>
       </td>
     </tr>`;
-  }).join('');
+}
+
+function liveRowHtml(w) {
+  const source = w.endpointPath ? endpointLabel({ path: w.endpointPath }) : 'Live';
+  const reqPreview = w.body?.userData != null && w.body.userData !== ''
+    ? String(w.body.userData)
+    : (w.body ? JSON.stringify(w.body).slice(0, 60) : '—');
+  const resMsg = w.response?.message != null ? String(w.response.message) : '—';
+  const continued = w.response?.continueSession;
+  const pill = w.response
+    ? (continued
+      ? '<span class="pill pill-success">CON</span>'
+      : '<span class="pill pill-failure">END</span>')
+    : '<span class="pill pill-retry">pending</span>';
+  const fallback = w.liveFallback
+    ? ' <span class="text-yellow" style="font-size:.68rem">fallback</span>'
+    : '';
+  return `
+    <tr>
+      <td>
+        <code style="font-size:.72rem">${w.requestId?.slice(0, 12)}…</code><br>
+        <span class="text-muted" style="font-size:.7rem">${timeSince(w.receivedAt)}</span>
+      </td>
+      <td class="text-muted mono">${w.receivedAt ? new Date(w.receivedAt).toLocaleTimeString() : '—'}</td>
+      <td>
+        <div style="font-size:.78rem;font-weight:600">${escapeHtml(source)}</div>
+        <div class="text-muted" style="font-size:.68rem">${escapeHtml(w.body?.msisdn || '')}</div>
+      </td>
+      <td class="mono truncate" title="${escapeHtml(reqPreview)}">${escapeHtml(reqPreview)}</td>
+      <td>
+        <div class="flex-center">${pill}${fallback}</div>
+        <div class="text-muted truncate" style="font-size:.72rem;max-width:260px" title="${escapeHtml(resMsg)}">${escapeHtml(resMsg)}</div>
+      </td>
+      <td>
+        <button class="btn btn-ghost btn-sm" onclick="viewWebhook('${w.requestId}')">Transcript</button>
+      </td>
+    </tr>`;
+}
+
+router.get('/webhooks/view', async (req, res) => {
+  const webhooks = await webhookStore.list(100, 0);
+  const webhookCount = await webhookStore.count();
+  const tab = req.query.tab === 'live' ? 'live' : 'faf';
+  const fafEvents = webhooks.filter(w => !isLiveEndpoint(w.endpointPath || ''));
+  const liveEvents = webhooks.filter(w => isLiveEndpoint(w.endpointPath || ''));
+  const fafCount = fafEvents.length;
+  const liveCount = liveEvents.length;
+  const isLiveTab = tab === 'live';
+  const rows = isLiveTab ? liveEvents.map(liveRowHtml).join('') : fafEvents.map(webhookRowHtml).join('');
+  const emptyLive = `<div class="empty-state"><div class="empty-icon">📡</div>No live transcripts yet. Send an Arkesel USSD callback to <code>/webhook/arkesel-ussd</code>.</div>`;
+  const emptyFaf = `<div class="empty-state"><div class="empty-icon">🗂</div>No webhooks stored yet. Send a webhook to <code>${config.webhookPath}</code>.</div>`;
+  const table = isLiveTab
+    ? `<table class="data-table">
+          <thead>
+            <tr><th>Request ID</th><th>Received</th><th>Source</th><th>User input</th><th>Response</th><th></th></tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>`
+    : `<table class="data-table">
+          <thead>
+            <tr><th>Request ID</th><th>Received</th><th>Source</th><th>Payload Preview</th><th>Content-Type</th><th>Actions</th></tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>`;
 
   const body = `
 <div class="page">
   <div class="page-header">
     <div>
-      <div class="page-title">Stored Webhooks</div>
-      <div class="page-sub">${webhookCount} of ${config.store.maxWebhooks} slots used — newest first</div>
+      <div class="page-title">${isLiveTab ? 'Live logs' : 'Stored Events'}</div>
+      <div class="page-sub">${isLiveTab ? 'Request/response transcripts for USSD and other live sources' : `${webhookCount} of ${config.store.maxWebhooks} slots used — newest first`}</div>
     </div>
     <div style="display:flex;gap:.6rem">
       <button class="btn btn-ghost" onclick="location.reload()">↺ Refresh</button>
     </div>
   </div>
 
+  <div class="settings-tabs" role="tablist" style="display:flex;gap:.4rem;margin-bottom:1.25rem;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:.35rem;max-width:520px">
+    <a href="/admin/webhooks/view?tab=faf" class="tab-btn${tab === 'faf' ? ' nav-active' : ''}" style="flex:1;text-align:center;text-decoration:none;color:inherit;font-size:.85rem;font-weight:600;padding:.65rem .9rem;border-radius:7px">Fire-and-forget (${fafCount})</a>
+    <a href="/admin/webhooks/view?tab=live" class="tab-btn${tab === 'live' ? ' nav-active' : ''}" style="flex:1;text-align:center;text-decoration:none;color:inherit;font-size:.85rem;font-weight:600;padding:.65rem .9rem;border-radius:7px">Live request/response (${liveCount})</a>
+  </div>
+
   <div class="panel">
-    ${webhooks.length === 0
-      ? `<div class="empty-state"><div class="empty-icon">🗂</div>No webhooks stored yet. Send a webhook to <code>${config.webhookPath}</code> to get started.</div>`
-      : `<table class="data-table">
-          <thead>
-            <tr><th>Request ID</th><th>Received</th><th>Payload Preview</th><th>Content-Type</th><th>Actions</th></tr>
-          </thead>
-          <tbody>${rows}</tbody>
-        </table>
-        <div class="panel-footer">${webhooks.length} webhook${webhooks.length !== 1 ? 's' : ''} stored (max ${config.store.maxWebhooks})</div>`
+    ${rows.length === 0
+      ? (isLiveTab ? emptyLive : emptyFaf)
+      : `${table}
+        <div class="panel-footer">${isLiveTab ? liveCount + ' live transcript' : fafCount + ' fire-and-forget event'}${(isLiveTab ? liveCount : fafCount) !== 1 ? 's' : ''} in this tab</div>`
     }
   </div>
 </div>
@@ -700,7 +776,7 @@ router.get('/webhooks/view', async (req, res) => {
 <div class="modal-backdrop" id="modal" onclick="if(event.target===this)closeModal()">
   <div class="modal">
     <div class="modal-header">
-      <span class="modal-title" id="modal-title">Payload</span>
+      <span class="modal-title" id="modal-title">Transcript</span>
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
     <div class="modal-body"><pre class="modal-pre" id="modal-body"></pre></div>
@@ -722,20 +798,21 @@ function showToast(msg, ok = true) {
 }
 
 async function viewWebhook(requestId) {
-  document.getElementById('modal-title').textContent = 'Webhook — ' + requestId.slice(0, 12) + '…';
+  document.getElementById('modal-title').textContent = 'Transcript — ' + requestId.slice(0, 12) + '…';
   document.getElementById('modal-body').textContent = 'Loading…';
   document.getElementById('modal').classList.add('open');
   try {
-    const epPath = window._primaryEndpoint || '/webhook';
-    const r = await fetch(epPath + '/' + requestId);
+    const r = await fetch('/admin/webhooks/' + requestId);
     if (!r.ok) { document.getElementById('modal-body').textContent = 'Not found (status ' + r.status + ')'; return; }
     const data = await r.json();
     const display = {
       endpoint:    data.endpointPath  || '—',
       receivedAt:  data.receivedAt    || '—',
       method:      data.method        || '—',
-      contentType: data.headers?.['content-type'] || '—',
-      body:        data.body,
+      request:     data.body,
+      response:    data.response || undefined,
+      outcomes:    data.liveOutcomes || undefined,
+      fallback:    data.liveFallback || undefined,
       query:       Object.keys(data.query || {}).length ? data.query : undefined,
     };
     document.getElementById('modal-body').textContent = JSON.stringify(display, null, 2);
@@ -768,7 +845,12 @@ window._primaryEndpoint = ${JSON.stringify(config.webhookPath)};
 </script>`;
 
   res.setHeader('Content-Type', 'text/html');
-  res.send(htmlPage('Stored Webhooks', '/admin/webhooks/view', body, scripts));
+  res.send(htmlPage(
+    isLiveTab ? 'Live logs' : 'Stored Webhooks',
+    isLiveTab ? '/admin/webhooks/view?tab=live' : '/admin/webhooks/view',
+    body,
+    scripts,
+  ));
 });
 
 /* ═══════════════════════════════════════════════════════════════
@@ -841,6 +923,12 @@ router.get('/webhooks', async (req, res) => {
   const total = await webhookStore.count();
   const webhooks = await webhookStore.list(limit, offset);
   res.json({ total, webhooks });
+});
+
+router.get('/webhooks/:requestId', async (req, res) => {
+  const entry = await webhookStore.get(req.params.requestId);
+  if (!entry) return res.status(404).json({ error: 'Webhook not found' });
+  res.json(entry);
 });
 
 router.post('/reset', async (req, res) => {
