@@ -217,7 +217,6 @@ router.get('/', (req, res) => {
   </a>
   <div class="nav-links">
     <a class="btn-nav btn-ghost" href="/health">Health</a>
-    <a class="btn-nav btn-primary" href="/login">Admin Login</a>
   </div>
 </nav>
 

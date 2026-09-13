@@ -11,7 +11,7 @@ const dlq = require('../store/deadLetterQueue');
 const db = require('../store/db');
 const { updateEnvFile } = require('../utils/envFile');
 const { logger } = require('../middleware/logger');
-const { annotateEndpoint, endpointLabel, ensureKnownSources, isLiveEndpoint } = require('../sources');
+const { annotateEndpoint, endpointLabel, ensureKnownSources, isLiveEndpoint, liveModeForPath } = require('../sources');
 
 const router = express.Router();
 
@@ -75,8 +75,9 @@ function endpointRowsForForm() {
     live: isLiveEndpoint(ep),
     hasCustomTargets: Boolean(ep.targets),
   }));
-  // Extra empty row for adding a new fire-and-forget endpoint
-  rows.push({ index: config.endpoints.length, path: '', name: '', live: false, hasCustomTargets: false });
+  const next = config.endpoints.length;
+  rows.push({ index: next, path: '', name: '', live: false, hasCustomTargets: false });
+  rows.push({ index: next + 1, path: '', name: '', live: true, hasCustomTargets: false });
   return rows;
 }
 
@@ -259,6 +260,7 @@ function renderPage({ flash, values, activeTab } = {}) {
             ${row.path === config.webhookPath ? '<span class="endpoint-row-badge">default</span>' : ''}
             ${row.hasCustomTargets ? '<span class="endpoint-row-badge endpoint-row-badge-custom">custom targets</span>' : ''}
           </span>
+          <input type="hidden" name="endpoint_${row.index}_live" value="0">
           <input type="text" name="endpoint_${row.index}_path"
             value="${escapeHtml(row.path)}"
             placeholder="${row.path === config.webhookPath ? '/webhook' : '/webhook/my-source'}"
@@ -280,21 +282,21 @@ function renderPage({ flash, values, activeTab } = {}) {
         </div>
       </div>
       <div class="card-body">
-        ${liveRows.length === 0
-          ? '<span class="ep-all-badge">No live sources registered</span>'
-          : liveRows.map(row => `
+        ${liveRows.map(row => `
         <div class="endpoint-row">
           <span class="endpoint-row-num">
-            ${escapeHtml(row.name || 'Live')}
+            ${row.path ? escapeHtml(row.name || 'Live') : 'New'}
             <span class="endpoint-row-badge">live</span>
           </span>
+          <input type="hidden" name="endpoint_${row.index}_live" value="1">
           <input type="text" name="endpoint_${row.index}_path"
             value="${escapeHtml(row.path)}"
-            readonly title="Built-in live source">
+            placeholder="/webhook/my-live-source"
+            ${row.hasCustomTargets ? 'readonly title="Targets managed via config.json"' : ''}>
           ${row.path ? `<span class="endpoint-row-url" title="Callback URL">POST ${escapeHtml(row.path)}</span>` : ''}
         </div>
         `).join('')}
-        <div class="hint">Point the Arkesel USSD callback URL at this path. The forwarder waits for a target and returns <code style="background:#0f172a;padding:1px 4px;border-radius:4px;color:#94a3b8">sessionID / message / continueSession</code> JSON. Select <strong>Arkesel USSD</strong> under Receive from on a target below. Outbound timeout is shared with the Fire-and-forget tab.</div>
+        <div class="hint">Leave path empty to remove a live source. Paths must start with <code style="background:#0f172a;padding:1px 4px;border-radius:4px;color:#94a3b8">/</code>. The forwarder waits for a target and returns its response. Arkesel USSD payloads still return <code style="background:#0f172a;padding:1px 4px;border-radius:4px;color:#94a3b8">sessionID / message / continueSession</code>. Select the source under Receive from on a target below.</div>
       </div>
     </div>
 
@@ -523,7 +525,9 @@ router.post('/', async (req, res) => {
       errors.push(`Duplicate endpoint path: "${p}"`);
       continue;
     }
-    rawEndpointPaths.push(annotateEndpoint({ path: p, targets: null, name: existing?.name, mode: existing?.mode }));
+    const markedLive = req.body[`endpoint_${i}_live`] === '1';
+    const mode = liveModeForPath(p, markedLive || isLiveEndpoint(existing || p));
+    rawEndpointPaths.push(annotateEndpoint({ path: p, targets: null, name: existing?.name, mode }));
   }
   // Also carry forward any custom-target endpoints that weren't in the form
   config.endpoints.forEach(ep => {
@@ -578,11 +582,12 @@ router.post('/', async (req, res) => {
         index: i,
         path: req.body[`endpoint_${i}_path`] || '',
         name: config.endpoints[i]?.name || '',
-        live: isLiveEndpoint(config.endpoints[i] || req.body[`endpoint_${i}_path`] || ''),
+        live: req.body[`endpoint_${i}_live`] === '1' || isLiveEndpoint(config.endpoints[i] || req.body[`endpoint_${i}_path`] || ''),
         hasCustomTargets: Boolean(config.endpoints[i]?.targets),
       });
     }
     endpointRows.push({ index: endpointRows.length, path: '', name: '', live: false, hasCustomTargets: false });
+    endpointRows.push({ index: endpointRows.length, path: '', name: '', live: true, hasCustomTargets: false });
 
     res.setHeader('Content-Type', 'text/html');
     return res.status(400).send(renderPage({
@@ -640,10 +645,12 @@ router.post('/', async (req, res) => {
   dlq.maxSize = maxDlq;
 
   // ── Persist to .env and/or DB ──────────────────────────────────
-  const simplePaths = config.endpoints.filter(e => !e.targets); // only env-managed paths
+  const simpleFaf = config.endpoints.filter(e => !e.targets && !isLiveEndpoint(e));
+  const simpleLive = config.endpoints.filter(e => !e.targets && isLiveEndpoint(e));
   const envUpdates = {
-    WEBHOOK_PATH: simplePaths[0]?.path || '/webhook',
-    WEBHOOK_PATHS: simplePaths.slice(1).map(e => e.path).join(','),
+    WEBHOOK_PATH: simpleFaf[0]?.path || '/webhook',
+    WEBHOOK_PATHS: simpleFaf.slice(1).map(e => e.path).join(','),
+    WEBHOOK_LIVE_PATHS: simpleLive.map(e => e.path).join(','),
     REQUEST_TIMEOUT_MS: String(timeoutMs),
     RETRY_CONFIG: JSON.stringify({ maxAttempts: retryMaxAttempts, delays: retryDelays }),
     MAX_STORED_WEBHOOKS: String(maxWebhooks),

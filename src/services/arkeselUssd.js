@@ -24,6 +24,12 @@ function asBoolean(value) {
 /**
  * Normalize JSON, form-encoded, or query-string callbacks into the official shape.
  */
+function looksLikeUssd(req) {
+  const raw = isEmptyBody(req.body) ? (req.query || {}) : req.body;
+  if (!raw || typeof raw !== 'object') return false;
+  return Boolean(raw.sessionID || raw.sessionId || raw.userData != null || raw.msisdn || raw.phoneNumber);
+}
+
 function normalizeRequest(req) {
   const raw = isEmptyBody(req.body) ? (req.query || {}) : req.body;
   const src = raw && typeof raw === 'object' ? raw : {};
@@ -80,4 +86,4 @@ function buildResponse(incoming, targetBody) {
   };
 }
 
-module.exports = { isEmptyBody, normalizeRequest, buildResponse };
+module.exports = { isEmptyBody, looksLikeUssd, normalizeRequest, buildResponse };

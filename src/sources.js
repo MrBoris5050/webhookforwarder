@@ -2,7 +2,7 @@
  * Built-in incoming sources. Each appears as a "Receive from" option
  * and can carry a protocol mode (e.g. Arkesel USSD is request/response).
  */
-const LIVE_MODES = new Set(['arkesel-ussd']);
+const LIVE_MODES = new Set(['arkesel-ussd', 'live']);
 
 const KNOWN_SOURCES = {
   '/webhook/arkesel-ussd': {
@@ -53,7 +53,14 @@ function isArkeselUssd(endpointPath) {
 function isLiveEndpoint(epOrPath) {
   const path = typeof epOrPath === 'string' ? epOrPath : epOrPath?.path;
   const mode = typeof epOrPath === 'object' && epOrPath ? epOrPath.mode : undefined;
-  return LIVE_MODES.has(mode || sourceMeta(path).mode);
+  if (LIVE_MODES.has(mode)) return true;
+  return LIVE_MODES.has(sourceMeta(path).mode);
+}
+
+function liveModeForPath(path, explicitLive) {
+  if (sourceMeta(path).mode === 'arkesel-ussd') return 'arkesel-ussd';
+  if (explicitLive) return 'live';
+  return 'webhook';
 }
 
 module.exports = {
@@ -65,4 +72,5 @@ module.exports = {
   endpointLabel,
   isArkeselUssd,
   isLiveEndpoint,
+  liveModeForPath,
 };

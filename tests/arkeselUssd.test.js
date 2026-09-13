@@ -1,5 +1,5 @@
-const { normalizeRequest, buildResponse } = require('../src/services/arkeselUssd');
-const { isLiveEndpoint, endpointLabel } = require('../src/sources');
+const { normalizeRequest, buildResponse, looksLikeUssd } = require('../src/services/arkeselUssd');
+const { isLiveEndpoint, endpointLabel, liveModeForPath } = require('../src/sources');
 
 describe('live vs fire-and-forget sources', () => {
   it('treats Arkesel USSD as live', () => {
@@ -10,6 +10,20 @@ describe('live vs fire-and-forget sources', () => {
   it('treats ordinary webhook paths as fire-and-forget', () => {
     expect(isLiveEndpoint('/webhook')).toBe(false);
     expect(isLiveEndpoint('/webhook/jessco')).toBe(false);
+  });
+
+  it('marks user-added live paths as live', () => {
+    expect(isLiveEndpoint({ path: '/webhook/my-ussd', mode: 'live' })).toBe(true);
+    expect(liveModeForPath('/webhook/my-ussd', true)).toBe('live');
+    expect(liveModeForPath('/webhook/arkesel-ussd', true)).toBe('arkesel-ussd');
+    expect(liveModeForPath('/webhook/jessco', false)).toBe('webhook');
+  });
+});
+
+describe('looksLikeUssd', () => {
+  it('detects Arkesel-style payloads', () => {
+    expect(looksLikeUssd({ body: { sessionID: '1', userData: '1' } })).toBe(true);
+    expect(looksLikeUssd({ body: { event: 'click' } })).toBe(false);
   });
 });
 

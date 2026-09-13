@@ -18,6 +18,15 @@ const { signatureVerifier } = require('../middleware/signatureVerifier');
 const { forwardToAllTargets, deliverToTarget } = require('../services/forwarder');
 const arkeselUssd = require('../services/arkeselUssd');
 const { isArkeselUssd, isLiveEndpoint } = require('../sources');
+
+function currentEndpoint(path) {
+  const config = require('../config');
+  return config.endpoints.find(e => e.path === path) || { path };
+}
+
+function isLivePath(path) {
+  return isLiveEndpoint(currentEndpoint(path));
+}
 const stats = require('../store/stats');
 const webhookStore = require('../store/webhookStore');
 
@@ -28,21 +37,23 @@ function resolveTargets(endpointPath, endpointTargets) {
     if (!t.enabled) return false;
     const assigned = t.endpoints || [];
     // Unchecked "Receive from" means every fire-and-forget source, not live USSD.
-    if (assigned.length === 0) return !isLiveEndpoint(endpointPath);
+    if (assigned.length === 0) return !isLivePath(endpointPath);
     return assigned.includes(endpointPath);
   });
 }
 
 function createWebhookRouter(endpointPath, endpointTargets) {
   const router = express.Router();
-  const ussdMode = isArkeselUssd(endpointPath);
-  const verify = ussdMode ? (req, res, next) => next() : signatureVerifier;
+  const liveMode = () => isLivePath(endpointPath);
+  const ussdProtocol = (req) => isArkeselUssd(endpointPath) || arkeselUssd.looksLikeUssd(req);
+  const verify = (req, res, next) => (liveMode() ? next() : signatureVerifier(req, res, next));
 
-  /* ── ingest ── receive a new webhook (POST, or GET for USSD query callbacks) */
+  /* ── ingest ── receive a new webhook (POST, or GET for live callbacks) */
   async function ingest(req, res) {
     const requestId = req.requestId;
     const receivedAt = new Date().toISOString();
-    const body = ussdMode ? arkeselUssd.normalizeRequest(req) : req.body;
+    const useUssd = liveMode() && ussdProtocol(req);
+    const body = useUssd ? arkeselUssd.normalizeRequest(req) : req.body;
 
     await stats.incrementReceived();
 
@@ -68,8 +79,8 @@ function createWebhookRouter(endpointPath, endpointTargets) {
 
     const routedTargets = resolveTargets(endpointPath, endpointTargets);
 
-    // Arkesel USSD is request/response — wait for a target and echo the menu JSON.
-    if (ussdMode) {
+    // Live sources wait for a target and return that response to the caller.
+    if (liveMode()) {
       const started = Date.now();
       let targetBody = null;
       let outcomes = [];
@@ -87,14 +98,16 @@ function createWebhookRouter(endpointPath, endpointTargets) {
         logger.info('forward_complete', {
           requestId,
           endpoint: endpointPath,
-          mode: 'arkesel-ussd',
+          mode: useUssd ? 'arkesel-ussd' : 'live',
           outcomes,
         });
       } catch (err) {
         logger.error('forward_unexpected_error', { requestId, endpoint: endpointPath, error: err.message, stack: err.stack });
       }
 
-      const response = arkeselUssd.buildResponse(body, targetBody);
+      const response = useUssd
+        ? arkeselUssd.buildResponse(body, targetBody)
+        : (targetBody ?? { error: 'Service temporarily unavailable. Please try again.' });
       const durationMs = Date.now() - started;
       webhookData.response = response;
       webhookData.liveOutcomes = outcomes;
@@ -104,14 +117,16 @@ function createWebhookRouter(endpointPath, endpointTargets) {
       logger.info('live_response', {
         requestId,
         endpoint: endpointPath,
-        sessionID: body.sessionID,
-        msisdn: body.msisdn,
-        userData: body.userData,
-        continueSession: response.continueSession,
-        message: response.message,
         fallback: !targetBody,
         targets: routedTargets.length,
         durationMs,
+        ...(useUssd ? {
+          sessionID: body.sessionID,
+          msisdn: body.msisdn,
+          userData: body.userData,
+          continueSession: response.continueSession,
+          message: response.message,
+        } : {}),
       });
 
       if (!targetBody) {
@@ -143,7 +158,7 @@ function createWebhookRouter(endpointPath, endpointTargets) {
   }
 
   router.post('/', verify, ingest);
-  if (ussdMode) router.get('/', ingest);
+  if (liveMode()) router.get('/', ingest);
 
   /* ── GET /:requestId ── retrieve a stored webhook ─────────────── */
   router.get('/:requestId', async (req, res) => {

@@ -4,7 +4,7 @@
  */
 const fs = require('fs');
 const path = require('path');
-const { annotateEndpoint, ensureKnownSources } = require('./sources');
+const { annotateEndpoint, ensureKnownSources, sourceMeta } = require('./sources');
 
 function loadConfigFile() {
   const configPath = path.join(process.cwd(), 'config.json');
@@ -125,9 +125,15 @@ function buildEndpoints(fileConfig, env) {
     .map(p => p.trim())
     .filter(p => p && p !== primaryPath);
 
+  const livePaths = (env.WEBHOOK_LIVE_PATHS || '')
+    .split(',')
+    .map(p => p.trim())
+    .filter(p => p && p !== primaryPath && !extraPaths.includes(p));
+
   return ensureKnownSources([
     annotateEndpoint({ path: primaryPath, targets: null }),
     ...extraPaths.map(p => annotateEndpoint({ path: p, targets: null })),
+    ...livePaths.map(p => annotateEndpoint({ path: p, targets: null, mode: sourceMeta(p).mode === 'webhook' ? 'live' : undefined })),
   ]);
 }
 
