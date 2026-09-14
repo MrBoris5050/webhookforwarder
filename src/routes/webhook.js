@@ -17,6 +17,7 @@ const { logger } = require('../middleware/logger');
 const { signatureVerifier } = require('../middleware/signatureVerifier');
 const { forwardToAllTargets, deliverToTarget } = require('../services/forwarder');
 const arkeselUssd = require('../services/arkeselUssd');
+const ussdRouter = require('../services/ussdRouter');
 const { isArkeselUssd, isLiveEndpoint } = require('../sources');
 
 function currentEndpoint(path) {
@@ -78,6 +79,10 @@ function createWebhookRouter(endpointPath, endpointTargets) {
     });
 
     const routedTargets = resolveTargets(endpointPath, endpointTargets);
+    const ussdRoute = useUssd ? ussdRouter.classify(body) : null;
+    const liveTargets = useUssd
+      ? ussdRouter.filterTargets(routedTargets, ussdRoute, body.sessionID)
+      : routedTargets;
 
     // Live sources wait for a target and return that response to the caller.
     if (liveMode()) {
@@ -86,12 +91,20 @@ function createWebhookRouter(endpointPath, endpointTargets) {
       let outcomes = [];
       try {
         const results = await Promise.allSettled(
-          routedTargets.map(t => deliverToTarget(t, body, req.headers, requestId))
+          liveTargets.map(t => deliverToTarget(t, body, req.headers, requestId))
         );
-        const firstOk = results.find(r => r.status === 'fulfilled' && r.value?.success);
-        targetBody = firstOk?.value?.body ?? null;
+        const picked = useUssd
+          ? ussdRouter.pickResponse(results, liveTargets, ussdRoute)
+          : {
+            body: results.find(r => r.status === 'fulfilled' && r.value?.success)?.value?.body ?? null,
+            targetId: null,
+          };
+        targetBody = picked.body;
+        if (useUssd && body.sessionID && (ussdRoute || picked.targetId)) {
+          ussdRouter.remember(body.sessionID, ussdRoute || 'parent', picked.targetId);
+        }
         outcomes = results.map((r, i) => ({
-          targetId: routedTargets[i]?.id,
+          targetId: liveTargets[i]?.id,
           status: r.status === 'fulfilled' && r.value?.success ? 'success' : 'failed',
           error: r.status === 'rejected' ? r.reason?.message : (r.value?.success ? undefined : `HTTP ${r.value?.status}`),
         }));
@@ -118,7 +131,8 @@ function createWebhookRouter(endpointPath, endpointTargets) {
         requestId,
         endpoint: endpointPath,
         fallback: !targetBody,
-        targets: routedTargets.length,
+        targets: liveTargets.length,
+        ussdRoute,
         durationMs,
         ...(useUssd ? {
           sessionID: body.sessionID,
@@ -133,7 +147,7 @@ function createWebhookRouter(endpointPath, endpointTargets) {
         await stats.recordFailure(
           `live:${endpointPath}`,
           requestId,
-          { message: routedTargets.length ? 'No live target response' : 'No live target assigned' },
+          { message: liveTargets.length ? 'No live target response' : 'No live target assigned' },
           durationMs,
         );
       }

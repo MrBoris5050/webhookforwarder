@@ -42,6 +42,7 @@ function normalizeRequest(req) {
     msisdn: src.msisdn || src.phoneNumber || '',
     userData: src.userData != null ? src.userData : (src.text != null ? src.text : ''),
     network: src.network || '',
+    serviceCode: src.serviceCode || src.service_code || '',
   };
 }
 

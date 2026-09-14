@@ -46,6 +46,7 @@ describe('normalizeRequest', () => {
       msisdn: '233271231234',
       userData: '*928*1#',
       network: 'AIRTELTIGO',
+      serviceCode: '',
     });
   });
 
