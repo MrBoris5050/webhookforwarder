@@ -81,4 +81,49 @@ describe('ussdRouter', () => {
     expect(picked.body.message).toMatch(/Buy WiFi/);
     expect(picked.targetId).toBe('wifi');
   });
+
+  it('treats a fullwidth hash as the parent terminator', () => {
+    expect(ussdRouter.classify({
+      sessionID: 's-fw',
+      newSession: true,
+      userData: '*928*122\uFF03',
+      serviceCode: '',
+    })).toBe('parent');
+    expect(ussdRouter.classify({
+      sessionID: 's-fw-2',
+      newSession: true,
+      userData: '*928*122*2\uFF03',
+      serviceCode: '',
+    })).toBe('wifi');
+    expect(ussdRouter.extensionFromDial({
+      newSession: true,
+      userData: '*928*122*2\uFF03',
+    })).toBe('2');
+  });
+
+  it('does not pin a parent session when the same sessionID redials *2', () => {
+    const targets = [
+      { id: 'target-5', url: 'https://gh-checkers.example/ussd' },
+      { id: 'target-7', url: 'https://api.example/wifi-ussd/ussd' },
+    ];
+    ussdRouter.remember('9375494656649', 'parent', 'target-5');
+
+    const incoming = {
+      sessionID: '9375494656649',
+      newSession: true,
+      userData: '*928*122*2\uFF03',
+      serviceCode: '',
+    };
+    expect(ussdRouter.classify(incoming)).toBe('wifi');
+    expect(ussdRouter.filterTargets(targets, 'wifi', incoming.sessionID, incoming).map((t) => t.id))
+      .toEqual(['target-7']);
+  });
+
+  it('never returns a GH Checkers menu for a WiFi route', () => {
+    const results = [
+      { status: 'fulfilled', value: { success: true, body: { message: 'Welcome to GH Checkers\nBuy WAEC Result Checker\n1. WASSCE\n2. BECE', continueSession: true } } },
+    ];
+    const targets = [{ id: 'target-5', url: 'https://gh-checkers.example/ussd' }];
+    expect(ussdRouter.pickResponse(results, targets, 'wifi').body).toBeNull();
+  });
 });

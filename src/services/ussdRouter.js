@@ -14,7 +14,10 @@ const SESSION_TTL_MS = 20 * 60 * 1000;
 const sessions = new Map();
 
 function strip(value) {
-  return String(value || '').replace(/\s/g, '').replace(/#$/, '');
+  return String(value || '')
+    .replace(/[\s\u3000]/g, '')
+    .replace(/\uFF0A/g, '*')
+    .replace(/[#\uFF03]+$/g, '');
 }
 
 function parentCode() {
@@ -77,22 +80,24 @@ function extensionFromDial(incoming) {
 }
 
 function classify(incoming) {
-  const remembered = recall(incoming.sessionID);
-  if (remembered?.route) return remembered.route;
+  if (extensionFromDial(incoming)) return 'wifi';
 
   const userData = strip(incoming.userData);
   const service = strip(incoming.serviceCode);
   const parent = parentCode();
+  if (userData === parent || service === parent || (incoming.newSession && !userData)) {
+    return 'parent';
+  }
 
-  if (extensionFromDial(incoming)) return 'wifi';
-  if (userData === parent || service === parent) return 'parent';
-  if (incoming.newSession && !userData) return 'parent';
+  const remembered = recall(incoming.sessionID);
+  if (remembered?.route && !incoming.newSession) return remembered.route;
   return remembered?.route || null;
 }
 
-function filterTargets(targets, route, sessionID) {
+function filterTargets(targets, route, sessionID, incoming = {}) {
   const remembered = recall(sessionID);
-  if (remembered?.targetId) {
+  const canPin = remembered?.targetId && remembered.route === route && !incoming.newSession;
+  if (canPin) {
     const pinned = targets.filter((t) => t.id === remembered.targetId);
     if (pinned.length) return pinned;
   }
@@ -116,6 +121,10 @@ function looksLikeWifiMenu(body) {
   return /buy wifi|recent purchases|wifi voucher/i.test(String(body?.message || body || ''));
 }
 
+function looksLikeParentMenu(body) {
+  return /gh checkers|waec|wassce|bece/i.test(String(body?.message || body || ''));
+}
+
 function pickResponse(results, targets, route) {
   const ok = results
     .map((result, index) => ({
@@ -129,8 +138,9 @@ function pickResponse(results, targets, route) {
 
   let chosen = null;
   if (route === 'wifi') {
-    chosen = ok.find((item) => looksLikeWifiTarget(item.target) || looksLikeWifiMenu(item.body))
-      || ok[ok.length - 1];
+    chosen = ok.find((item) => looksLikeWifiMenu(item.body) && !looksLikeParentMenu(item.body))
+      || ok.find((item) => looksLikeWifiTarget(item.target) && !looksLikeParentMenu(item.body))
+      || ok.find((item) => !looksLikeParentMenu(item.body));
   } else if (route === 'parent') {
     chosen = ok.find((item) => !looksLikeWifiTarget(item.target) && !looksLikeWifiMenu(item.body));
   } else {

@@ -30,19 +30,27 @@ function looksLikeUssd(req) {
   return Boolean(raw.sessionID || raw.sessionId || raw.userData != null || raw.msisdn || raw.phoneNumber);
 }
 
+function normalizeUssdString(value) {
+  return String(value ?? '')
+    .replace(/\u3000/g, '')
+    .replace(/\uFF0A/g, '*')
+    .replace(/\uFF03/g, '#');
+}
+
 function normalizeRequest(req) {
   const raw = isEmptyBody(req.body) ? (req.query || {}) : req.body;
   const src = raw && typeof raw === 'object' ? raw : {};
 
   const newSessionHint = asBoolean(src.newSession);
+  const userData = src.userData != null ? src.userData : (src.text != null ? src.text : '');
   return {
     sessionID: src.sessionID || src.sessionId || '',
     userID: src.userID || src.userId || '',
     newSession: newSessionHint != null ? newSessionHint : src.type === 'initiation',
     msisdn: src.msisdn || src.phoneNumber || '',
-    userData: src.userData != null ? src.userData : (src.text != null ? src.text : ''),
+    userData: normalizeUssdString(userData),
     network: src.network || '',
-    serviceCode: src.serviceCode || src.service_code || '',
+    serviceCode: normalizeUssdString(src.serviceCode || src.service_code || ''),
   };
 }
 

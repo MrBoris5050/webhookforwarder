@@ -67,6 +67,12 @@ describe('normalizeRequest', () => {
       newSession: true,
     });
   });
+
+  it('converts a fullwidth USSD terminator to ASCII', () => {
+    expect(normalizeRequest({
+      body: { sessionID: '1', userData: '*928*122*2\uFF03', newSession: true },
+    }).userData).toBe('*928*122*2#');
+  });
 });
 
 describe('buildResponse', () => {

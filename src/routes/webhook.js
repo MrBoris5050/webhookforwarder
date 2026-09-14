@@ -81,7 +81,7 @@ function createWebhookRouter(endpointPath, endpointTargets) {
     const routedTargets = resolveTargets(endpointPath, endpointTargets);
     const ussdRoute = useUssd ? ussdRouter.classify(body) : null;
     const liveTargets = useUssd
-      ? ussdRouter.filterTargets(routedTargets, ussdRoute, body.sessionID)
+      ? ussdRouter.filterTargets(routedTargets, ussdRoute, body.sessionID, body)
       : routedTargets;
 
     // Live sources wait for a target and return that response to the caller.
