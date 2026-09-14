@@ -119,6 +119,15 @@ describe('ussdRouter', () => {
       .toEqual(['target-7']);
   });
 
+  it('fans out a WiFi dial when no target URL matches the WiFi token', () => {
+    const targets = [
+      { id: 'target-5', url: 'https://gh-checkers.example/ussd' },
+      { id: 'target-7', url: 'https://operators.example/ussd' },
+    ];
+    expect(ussdRouter.filterTargets(targets, 'wifi', 's-nomatch').map((t) => t.id))
+      .toEqual(['target-5', 'target-7']);
+  });
+
   it('never returns a GH Checkers menu for a WiFi route', () => {
     const results = [
       { status: 'fulfilled', value: { success: true, body: { message: 'Welcome to GH Checkers\nBuy WAEC Result Checker\n1. WASSCE\n2. BECE', continueSession: true } } },

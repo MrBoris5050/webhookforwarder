@@ -105,8 +105,8 @@ function filterTargets(targets, route, sessionID, incoming = {}) {
   if (!route) return targets;
   const wifi = targets.filter(looksLikeWifiTarget);
   const parent = targets.filter((t) => !looksLikeWifiTarget(t));
-  if (route === 'wifi') return wifi;
-  if (route === 'parent') return parent;
+  if (route === 'wifi') return wifi.length ? wifi : targets;
+  if (route === 'parent') return parent.length ? parent : targets;
   return targets;
 }
 
