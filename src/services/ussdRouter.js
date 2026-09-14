@@ -21,11 +21,22 @@ function parentCode() {
   return strip(PARENT_CODE);
 }
 
+function matchTokens(raw) {
+  return String(raw || '')
+    .split(',')
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
+}
+
 function looksLikeWifiTarget(target) {
   if (!target) return false;
   if (target.ussdRoute === 'wifi') return true;
+  if (target.ussdRoute === 'parent') return false;
   const url = String(target.url || '').toLowerCase();
-  return /wifi-ussd|:3040|\/ussd\/?$/.test(url);
+  const parentTokens = matchTokens(process.env.USSD_PARENT_TARGET_MATCH);
+  if (parentTokens.some((token) => url.includes(token))) return false;
+  const wifiTokens = matchTokens(process.env.USSD_WIFI_TARGET_MATCH || 'wifi-ussd,:3040');
+  return wifiTokens.some((token) => url.includes(token));
 }
 
 function pruneSessions() {
@@ -89,8 +100,8 @@ function filterTargets(targets, route, sessionID) {
   if (!route) return targets;
   const wifi = targets.filter(looksLikeWifiTarget);
   const parent = targets.filter((t) => !looksLikeWifiTarget(t));
-  if (route === 'wifi' && wifi.length) return wifi;
-  if (route === 'parent' && parent.length) return parent;
+  if (route === 'wifi') return wifi;
+  if (route === 'parent') return parent;
   return targets;
 }
 
@@ -116,15 +127,17 @@ function pickResponse(results, targets, route) {
 
   if (!ok.length) return { body: null, targetId: null };
 
-  let chosen = ok[0];
+  let chosen = null;
   if (route === 'wifi') {
     chosen = ok.find((item) => looksLikeWifiTarget(item.target) || looksLikeWifiMenu(item.body))
       || ok[ok.length - 1];
   } else if (route === 'parent') {
-    chosen = ok.find((item) => !looksLikeWifiTarget(item.target) && !looksLikeWifiMenu(item.body))
-      || ok[0];
+    chosen = ok.find((item) => !looksLikeWifiTarget(item.target) && !looksLikeWifiMenu(item.body));
+  } else {
+    chosen = ok[0];
   }
 
+  if (!chosen) return { body: null, targetId: null };
   return { body: chosen.body, targetId: chosen.target?.id || null };
 }
 

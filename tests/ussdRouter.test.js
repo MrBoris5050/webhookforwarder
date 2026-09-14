@@ -51,6 +51,23 @@ describe('ussdRouter', () => {
     expect(selected.map((t) => t.id)).toEqual(['wifi']);
   });
 
+  it('does not send parent dials to the WiFi target', () => {
+    const targets = [
+      { id: 'parent', url: 'https://legacy.example/ussd' },
+      { id: 'wifi', url: 'https://api.example/wifi-ussd/ussd' },
+    ];
+    expect(ussdRouter.filterTargets(targets, 'parent', 'p1').map((t) => t.id)).toEqual(['parent']);
+  });
+
+  it('does not pick the WiFi menu for a parent dial', () => {
+    const results = [{
+      status: 'fulfilled',
+      value: { success: true, body: { message: 'WiFi Vouchers\n1. Buy WiFi', continueSession: true } },
+    }];
+    const targets = [{ id: 'wifi', url: 'http://x/wifi-ussd/ussd' }];
+    expect(ussdRouter.pickResponse(results, targets, 'parent').body).toBeNull();
+  });
+
   it('ignores empty parent replies when picking a live response', () => {
     const results = [
       { status: 'fulfilled', value: { success: true, body: { ignored: true, message: '', continueSession: false } } },
